@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { motion } from "framer-motion";
 import {
   Cpu,
   MemoryStick,
@@ -9,6 +10,7 @@ import {
   Boxes,
   ArrowRight,
   Activity,
+  Sparkles,
 } from "lucide-react";
 import {
   getHardware,
@@ -18,6 +20,16 @@ import {
   type ModelInfo,
   type TasksetInfo,
 } from "../api/client";
+
+const stagger = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.06 } },
+};
+
+const fadeUp = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: [0.4, 0, 0.2, 1] as any } },
+};
 
 export default function DashboardPage() {
   const [hw, setHw] = useState<HardwareInfo | null>(null);
@@ -38,7 +50,10 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
-        <div className="text-gray-500 animate-pulse">Detecting hardware...</div>
+        <div className="space-y-3">
+          <div className="w-12 h-12 rounded-2xl shimmer mx-auto" />
+          <div className="text-fg-muted text-sm animate-pulse">Detecting hardware...</div>
+        </div>
       </div>
     );
   }
@@ -51,32 +66,31 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="space-y-8">
+    <motion.div variants={stagger} initial="hidden" animate="show" className="space-y-8">
       {/* Hero */}
-      <div className="text-center py-8">
-        <h1 className="text-4xl font-bold text-white mb-3">
-          Intuition Learning Pipeline Studio
+      <motion.div variants={fadeUp} className="text-center py-8">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/10 border border-accent/20 mb-4">
+          <Sparkles className="w-3.5 h-3.5 text-accent" />
+          <span className="text-xs font-medium text-accent">Intuition Learning Pipeline</span>
+        </div>
+        <h1 className="text-4xl font-bold tracking-tight text-fg-primary mb-3">
+          Train smarter, locally.
         </h1>
-        <p className="text-gray-400 text-lg max-w-2xl mx-auto">
-          Run SFT + GRPO RL pipelines on your local hardware. Detect your GPU,
-          pick a compatible model, select a taskset, and train.
+        <p className="text-fg-secondary text-lg max-w-2xl mx-auto">
+          Run SFT + GRPO RL pipelines on your hardware. Detect your GPU, pick a
+          compatible model, select a taskset, and train.
         </p>
-      </div>
+      </motion.div>
 
       {/* Hardware summary */}
       {hw && (
-        <div className="card">
-          <div className="flex items-center gap-2 mb-4">
-            <Activity className="w-5 h-5 text-brand-400" />
-            <h2 className="text-xl font-semibold text-white">Hardware Detected</h2>
+        <motion.div variants={fadeUp} className="glass glass-hover rounded-2xl p-6">
+          <div className="flex items-center gap-2 mb-5">
+            <Activity className="w-5 h-5 text-accent" />
+            <h2 className="text-lg font-semibold text-fg-primary">Hardware Detected</h2>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <HwCard
-              icon={Cpu}
-              label="CPU"
-              value={hw.cpu_name}
-              subvalue={`${hw.cpu_cores} cores`}
-            />
+            <HwCard icon={Cpu} label="CPU" value={hw.cpu_name} subvalue={`${hw.cpu_cores} cores`} />
             <HwCard
               icon={MemoryStick}
               label="Memory"
@@ -102,14 +116,14 @@ export default function DashboardPage() {
               subvalue={`${hw.total_memory_gb.toFixed(1)} GB for models`}
             />
           </div>
-          <div className="flex flex-wrap gap-2 mt-4">
+          <div className="flex flex-wrap gap-2 mt-5">
             {hw.labels.map((label) => (
-              <span key={label} className="badge badge-blue">
+              <span key={label} className="badge badge-accent">
                 {label}
               </span>
             ))}
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* Quick stats */}
@@ -118,7 +132,7 @@ export default function DashboardPage() {
           icon={Cpu}
           label="Compatible Models"
           value={`${recommendedModels.length + feasibleModels.length}`}
-          subvalue={`${recommendedModels.length} recommended, ${feasibleModels.length} feasible`}
+          subvalue={`${recommendedModels.length} recommended · ${feasibleModels.length} feasible`}
           to="/models"
         />
         <StatCard
@@ -138,34 +152,39 @@ export default function DashboardPage() {
       </div>
 
       {/* Recommended models preview */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold text-white">
+      <motion.div variants={fadeUp} className="glass rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-fg-primary">
             Recommended for Your Hardware
           </h2>
           <Link
             to="/models"
-            className="text-brand-400 hover:text-brand-300 text-sm flex items-center gap-1"
+            className="text-accent hover:text-accent-hover text-sm flex items-center gap-1 font-medium transition-colors"
           >
             View all <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {recommendedModels.slice(0, 6).map((m) => (
-            <div
+          {recommendedModels.slice(0, 6).map((m, i) => (
+            <motion.div
               key={m.id}
-              className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-4 hover:border-brand-600/50 transition-colors"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 + i * 0.05 }}
+              className="glass glass-hover rounded-xl p-4"
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-white text-sm">{m.name}</span>
+                <span className="font-medium text-fg-primary text-sm">{m.name}</span>
                 <span className="badge badge-green">{m.compatibility.best_precision}</span>
               </div>
-              <p className="text-xs text-gray-400">{m.params_b}B params · {m.compatibility.best_precision_gb}GB</p>
-            </div>
+              <p className="text-xs text-fg-muted">
+                {m.params_b}B params · {m.compatibility.best_precision_gb}GB
+              </p>
+            </motion.div>
           ))}
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -181,13 +200,13 @@ function HwCard({
   subvalue: string;
 }) {
   return (
-    <div className="bg-gray-800/50 rounded-lg p-4">
-      <div className="flex items-center gap-2 text-gray-400 text-xs mb-2">
-        <Icon className="w-4 h-4" />
+    <div className="rounded-xl p-4 bg-bg-glass/40 border border-white/5">
+      <div className="flex items-center gap-2 text-fg-muted text-xs mb-2">
+        <Icon className="w-4 h-4" strokeWidth={2} />
         {label}
       </div>
-      <div className="text-white font-medium text-sm truncate">{value}</div>
-      <div className="text-gray-500 text-xs mt-1">{subvalue}</div>
+      <div className="text-fg-primary font-medium text-sm truncate">{value}</div>
+      <div className="text-fg-muted text-xs mt-1">{subvalue}</div>
     </div>
   );
 }
@@ -206,17 +225,14 @@ function StatCard({
   to: string;
 }) {
   return (
-    <Link
-      to={to}
-      className="card hover:border-brand-600/50 transition-colors group"
-    >
-      <div className="flex items-center gap-2 text-gray-400 text-sm mb-3">
-        <Icon className="w-5 h-5" />
+    <Link to={to} className="glass glass-hover rounded-2xl p-6 group block">
+      <div className="flex items-center gap-2 text-fg-muted text-sm mb-3">
+        <Icon className="w-5 h-5" strokeWidth={2} />
         {label}
       </div>
-      <div className="text-3xl font-bold text-white mb-1">{value}</div>
-      <div className="text-gray-500 text-sm">{subvalue}</div>
-      <div className="mt-3 text-brand-400 text-xs flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="text-3xl font-bold text-fg-primary mb-1 tracking-tight">{value}</div>
+      <div className="text-fg-muted text-sm">{subvalue}</div>
+      <div className="mt-3 text-accent text-xs flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
         Open <ArrowRight className="w-3 h-3" />
       </div>
     </Link>
