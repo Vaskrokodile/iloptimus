@@ -6,18 +6,23 @@ and tracks training runs in real time.
 
 ## Quick Start
 
-```bash
-# Install
-pip install -e .
+> **Requires Apple Silicon (M1/M2/M3/M4)** — the pipeline uses MLX for
+> inference and LoRA fine-tuning. CUDA/vLLM support is detected but not yet
+> implemented in the training path.
 
-# Or with mlx support on Apple Silicon
-pip install -e ".[mlx]"
+```bash
+# Clone
+git clone https://github.com/Vaskrokodile/iloptimus.git
+cd iloptimus
+
+# Install (editable, so the taskset grader can find task definitions)
+uv sync --extra dev
 
 # Start the server (opens browser automatically)
-iloptimus serve
+uv run iloptimus serve
 
 # Or manually
-iloptimus serve --host 127.0.0.1 --port 7860 --no-browser
+uv run iloptimus serve --host 127.0.0.1 --port 7860 --no-browser
 ```
 
 Then open `http://127.0.0.1:7860` in your browser.
@@ -99,9 +104,9 @@ final = correctness × (0.6 + 0.4 × reasoning_quality)
 ## CLI Commands
 
 ```bash
-iloptimus serve              # Start server + open browser
-iloptimus hardware           # Print detected hardware info
-iloptimus version            # Print version
+uv run iloptimus serve              # Start server + open browser
+uv run iloptimus hardware           # Print detected hardware info
+uv run iloptimus version            # Print version
 ```
 
 ## API Endpoints
@@ -121,10 +126,13 @@ iloptimus version            # Print version
 
 ## Backends
 
-- **MLX** (Apple Silicon) — uses `mlx_lm` for inference and LoRA fine-tuning.
+- **MLX** (Apple Silicon) — uses `mlx_lm` for inference and LoRA
+  fine-tuning. **This is the only backend currently implemented.**
   Recommended for M-series Macs with unified memory.
-- **vLLM** (CUDA) — uses `vllm` for high-throughput inference on NVIDIA GPUs.
-- **CPU** — fallback for systems without GPU acceleration (slow, small models only).
+- **vLLM** (CUDA) — detected and shown in the UI, but inference/training
+  code is not yet implemented. Planned.
+- **CPU** — fallback for systems without GPU acceleration (slow, small
+  models only). Not yet implemented.
 
 ## License
 
