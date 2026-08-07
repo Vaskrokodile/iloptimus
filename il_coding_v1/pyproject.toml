@@ -1,0 +1,18 @@
+[project]
+name = "il-coding-v1"
+version = "0.1.0"
+description = "Handcrafted coding tasks with IL efficiency-aware reward shaping: sandboxed test execution + anti-laziness + reasoning-quality scoring."
+tags = ["code", "il", "intuition-learning", "single-turn", "execution", "v1"]
+requires-python = ">=3.11"
+dependencies = ["verifiers>=0.2.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["il_coding_v1"]
+
+[tool.verifiers.eval]
+num_examples = 12
+rollouts_per_example = 4
