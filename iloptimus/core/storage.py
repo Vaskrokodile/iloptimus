@@ -1,0 +1,56 @@
+"""Durable per-user storage for models, environments, and training runs."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+def app_home() -> Path:
+    configured = os.environ.get("ILOPTIMUS_HOME")
+    return Path(configured).expanduser().resolve() if configured else Path.home() / ".iloptimus"
+
+
+def models_dir() -> Path:
+    return app_home() / "models"
+
+
+def environments_dir() -> Path:
+    return app_home() / "environments"
+
+
+def runs_dir() -> Path:
+    return app_home() / "runs"
+
+
+def ensure_app_dirs() -> Path:
+    root = app_home()
+    for path in (root, models_dir(), environments_dir(), runs_dir()):
+        path.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def run_dir(run_id: str) -> Path:
+    return runs_dir() / run_id
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())

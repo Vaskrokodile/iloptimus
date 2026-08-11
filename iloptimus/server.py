@@ -4,34 +4,51 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import (
     FileResponse,
-    JSONResponse,
-    StreamingResponse,
     HTMLResponse,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from . import __version__
 from .core import (
+    RunConfig,
+    _stream_events,
+    check_compatibility,
+    create_run,
     detect_hardware,
     get_all_models,
-    get_model,
-    check_compatibility,
-    get_all_tasksets,
-    get_taskset,
-    create_run,
-    get_run,
     get_all_runs,
+    get_all_tasksets,
+    get_model,
+    get_run,
+    get_taskset,
     run_pipeline,
-    _stream_events,
-    RunConfig,
 )
+from .core.environments import (
+    delete_environment,
+    draft_environment,
+    get_environment,
+    list_environments,
+    save_environment,
+)
+from .core.inference import ModelHandle, load_model, run_inference
+from .core.model_store import (
+    compatible_precision,
+    download_model,
+    model_status,
+    resolve_model_source,
+)
+from .core.pipeline import _run_in_executor
+from .core.storage import app_home, ensure_app_dirs
+
 
 class CreateRunRequest(BaseModel):
     model_id: str
@@ -47,10 +64,26 @@ class CreateRunRequest(BaseModel):
     max_seq_length: int = 768
     benchmark_tasks: int = 12
     rollouts_per_example: int = 4
+    max_reasoning_tokens: int = 256
+    max_answer_tokens: int = 128
+
+
+class ChatRequest(BaseModel):
+    model_id: str
+    message: str
+    history: list[dict[str, str]] = Field(default_factory=list)
+    max_tokens: int = 384
+
+
+class DownloadModelRequest(BaseModel):
+    precision: Optional[str] = None
 
 
 # Cache hardware detection
 _hw_cache = None
+_chat_models: dict[str, ModelHandle] = {}
+_chat_model_lock = asyncio.Lock()
+_download_tasks: dict[str, asyncio.Task] = {}
 
 
 def _get_hardware():
@@ -61,13 +94,14 @@ def _get_hardware():
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="IL Optimus", version="0.1.0")
+    ensure_app_dirs()
+    app = FastAPI(title="IL Optimus", version=__version__)
 
     # ---- API routes ----
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": __version__, "data_dir": str(app_home())}
 
     @app.get("/api/hardware")
     async def hardware():
@@ -98,6 +132,7 @@ def create_app() -> FastAPI:
         result = []
         for m in get_all_models():
             compat = check_compatibility(m, hw)
+            precision = compatible_precision(m, hw)
             result.append({
                 "id": m.id,
                 "name": m.name,
@@ -111,6 +146,7 @@ def create_app() -> FastAPI:
                 "backends": m.backends,
                 "description": m.description,
                 "tags": m.tags,
+                "local": model_status(m.id, precision, hw.recommended_backend),
                 "compatibility": {
                     "status": compat.status,
                     "best_precision": compat.best_precision,
@@ -128,6 +164,7 @@ def create_app() -> FastAPI:
         if not m:
             raise HTTPException(404, "Model not found")
         compat = check_compatibility(m, hw)
+        precision = compatible_precision(m, hw)
         return {
             "id": m.id,
             "name": m.name,
@@ -142,6 +179,7 @@ def create_app() -> FastAPI:
             "backends": m.backends,
             "description": m.description,
             "tags": m.tags,
+            "local": model_status(m.id, precision, hw.recommended_backend),
             "compatibility": {
                 "status": compat.status,
                 "best_precision": compat.best_precision,
@@ -149,6 +187,79 @@ def create_app() -> FastAPI:
                 "reason": compat.reason,
                 "score": compat.score,
             },
+        }
+
+    @app.get("/api/models/{model_id}/status")
+    async def model_download_status(model_id: str):
+        model = get_model(model_id)
+        if not model:
+            raise HTTPException(404, "Model not found")
+        hw = _get_hardware()
+        precision = compatible_precision(model, hw)
+        return model_status(model_id, precision, hw.recommended_backend)
+
+    @app.post("/api/models/{model_id}/download")
+    async def start_model_download(model_id: str, req: DownloadModelRequest):
+        model = get_model(model_id)
+        if not model:
+            raise HTTPException(404, "Model not found")
+        hw = _get_hardware()
+        if hw.recommended_backend != "mlx":
+            raise HTTPException(409, "This release supports model download and training on Apple Silicon with MLX")
+        compatibility = check_compatibility(model, hw)
+        if compatibility.status == "not-recommended":
+            raise HTTPException(409, compatibility.reason)
+        precision = req.precision or compatible_precision(model, hw)
+        current = model_status(model_id, precision, hw.recommended_backend)
+        if current["status"] == "downloaded":
+            return current
+        task = _download_tasks.get(model_id)
+        if not task or task.done():
+            task = asyncio.create_task(asyncio.to_thread(download_model, model_id, precision, hw.recommended_backend))
+            _download_tasks[model_id] = task
+        return {**current, "status": "queued", "precision": precision}
+
+    @app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        model_info = get_model(req.model_id)
+        if not model_info:
+            raise HTTPException(400, f"Unknown model: {req.model_id}")
+
+        async with _chat_model_lock:
+            handle = _chat_models.get(req.model_id)
+            if handle is None:
+                hw = _get_hardware()
+                precision = compatible_precision(model_info, hw)
+                source = resolve_model_source(req.model_id, precision, hw.recommended_backend)
+                if not source:
+                    raise HTTPException(409, "Download this model from Model Library before chatting")
+                handle = await _run_in_executor(
+                    load_model,
+                    model_info.huggingface_id,
+                    precision,
+                    source_override=source,
+                )
+                _chat_models.clear()
+                _chat_models[req.model_id] = handle
+
+            context = req.history[-8:]
+            prompt = "\n".join(
+                [f"{item.get('role', 'user')}: {item.get('text', '')}" for item in context]
+                + [f"user: {req.message}"]
+            )
+            result = await _run_in_executor(
+                run_inference,
+                handle,
+                prompt,
+                min(req.max_tokens, 512),
+                min(req.max_tokens, 512),
+            )
+
+        return {
+            "answer": result.answer or result.text,
+            "reasoning": result.reasoning,
+            "tokens_per_sec": result.tokens_per_sec,
+            "model_id": req.model_id,
         }
 
     @app.get("/api/tasksets")
@@ -185,6 +296,75 @@ def create_app() -> FastAPI:
             "eval_config": t.eval_config,
         }
 
+    # ---- No-code IL/RL environments ----
+
+    @app.get("/api/environments")
+    async def environments():
+        return list_environments()
+
+    @app.get("/api/environments/{environment_id}")
+    async def environment_detail(environment_id: str):
+        environment = get_environment(environment_id)
+        if not environment:
+            raise HTTPException(404, "Environment not found")
+        return environment
+
+    @app.post("/api/environments")
+    async def create_environment_endpoint(payload: dict[str, Any]):
+        try:
+            return save_environment(payload)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+
+    @app.delete("/api/environments/{environment_id}")
+    async def delete_environment_endpoint(environment_id: str):
+        if not delete_environment(environment_id):
+            raise HTTPException(404, "Environment not found")
+        return {"deleted": True}
+
+    @app.post("/api/environments/from-chat")
+    async def create_environment_from_chat(payload: dict[str, Any]):
+        mode = str(payload.get("mode", "IL")).upper()
+        description = str(payload.get("description", "")).strip()
+        model_id = str(payload.get("model_id", ""))
+        if mode not in {"IL", "RL"} or len(description) < 12:
+            raise HTTPException(400, "Use /il or /rl followed by a clear environment goal")
+        design_prompt = f"""Design a no-code {mode} training environment from this request: {description}
+Return only one JSON object with: name, goal, description, domain, interaction (observation, action, max_steps), reward (correctness, reasoning, efficiency, method), and tasks. Tasks must be a list of 3 objects with name, prompt, expected_answer, criteria, difficulty. Make every task concrete and gradable."""
+        async with _chat_model_lock:
+            handle = _chat_models.get(model_id)
+            if handle is None:
+                model_info = get_model(model_id)
+                if not model_info:
+                    raise HTTPException(400, "Unknown model")
+                hw = _get_hardware()
+                precision = compatible_precision(model_info, hw)
+                source = resolve_model_source(model_id, precision, hw.recommended_backend)
+                if not source:
+                    raise HTTPException(409, "Download the selected model before building an environment")
+                handle = await _run_in_executor(
+                    load_model,
+                    model_info.huggingface_id,
+                    precision,
+                    source_override=source,
+                )
+                _chat_models.clear()
+                _chat_models[model_id] = handle
+            result = await _run_in_executor(run_inference, handle, design_prompt, 512, 512)
+        raw = result.answer or result.text
+        generated = None
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            try:
+                generated = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                generated = None
+        try:
+            environment = save_environment(draft_environment(mode, description, generated))
+        except ValueError:
+            environment = save_environment(draft_environment(mode, description))
+        return environment
+
     # ---- Run management ----
 
     @app.post("/api/runs")
@@ -198,8 +378,17 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"Unknown taskset: {req.taskset_id}")
 
         backend = req.backend or hw.recommended_backend
-        compat = check_compatibility(model, hw)
-        precision = req.precision or compat.best_precision
+        precision = req.precision or compatible_precision(model, hw)
+        if backend != "mlx":
+            raise HTTPException(409, "This release supports local training on Apple Silicon with MLX")
+        if not resolve_model_source(model.id, precision, backend):
+            raise HTTPException(409, "Download this model from Model Library before training")
+
+        if _chat_models:
+            from .core.inference import release_memory
+
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
 
         config = RunConfig(
             model_id=req.model_id,
@@ -215,6 +404,8 @@ def create_app() -> FastAPI:
             max_seq_length=req.max_seq_length,
             benchmark_tasks=req.benchmark_tasks,
             rollouts_per_example=req.rollouts_per_example,
+            max_reasoning_tokens=req.max_reasoning_tokens,
+            max_answer_tokens=req.max_answer_tokens,
         )
         state = create_run(config)
 
@@ -233,6 +424,24 @@ def create_app() -> FastAPI:
         if not state:
             raise HTTPException(404, "Run not found")
         return state.to_dict()
+
+    @app.get("/api/runs/{run_id}/artifacts")
+    async def list_run_artifacts(run_id: str):
+        state = get_run(run_id)
+        if not state:
+            raise HTTPException(404, "Run not found")
+        from .core.storage import run_dir
+
+        folder = run_dir(run_id)
+        return {
+            "run_id": run_id,
+            "folder": str(folder),
+            "files": [
+                {"path": str(path.relative_to(folder)), "bytes": path.stat().st_size}
+                for path in sorted(folder.rglob("*"))
+                if path.is_file()
+            ],
+        }
 
     @app.get("/api/runs/{run_id}/events")
     async def stream_run_events(run_id: str):

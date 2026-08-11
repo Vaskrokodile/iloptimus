@@ -12,22 +12,24 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-
 from iloptimus.core import (
     RunConfig,
     create_run,
-    get_run,
     run_pipeline,
 )
-from iloptimus.core.grader import GradedResult, grade_response, build_prompt, get_num_tasks
+from iloptimus.core.benchmark import BenchmarkResult, TaskResult
+from iloptimus.core.grader import GradedResult, build_prompt, get_num_tasks, grade_response
 from iloptimus.core.hardware import detect_hardware
 from iloptimus.core.inference import InferenceResult, ModelHandle
-from iloptimus.core.benchmark import BenchmarkResult, TaskResult
-
 
 # ---------------------------------------------------------------------------
 # Grader tests (real, no mocking)
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path / "iloptimus-home"))
 
 def test_grader_reasoning_wrong_answer():
     """A wrong answer should get score 0 with low reasoning quality."""
@@ -173,6 +175,8 @@ def test_pipeline_runs_all_stages(hw, mock_handle, mock_benchmark_result):
         return metrics
 
     with patch("iloptimus.core.inference.load_model", side_effect=fake_load_model), \
+         patch("iloptimus.core.model_store.resolve_model_source", return_value="/tmp/mock-model"), \
+         patch("iloptimus.core.inference.swap_adapters", side_effect=lambda model, path: model), \
          patch("iloptimus.core.benchmark.run_benchmark", side_effect=fake_run_benchmark), \
          patch("iloptimus.core.sft.generate_sft_data", side_effect=fake_generate_sft_data), \
          patch("iloptimus.core.sft.run_sft", side_effect=fake_run_sft), \
@@ -198,6 +202,9 @@ def test_pipeline_runs_all_stages(hw, mock_handle, mock_benchmark_result):
     assert len(state.sft_loss_history) == 2
     assert len(state.grpo_reward_history) == 2
     assert state.metrics["total_improvement"] == 0.0
+    from iloptimus.core.storage import run_dir
+    assert (run_dir(state.id) / "run.json").exists()
+    assert (run_dir(state.id) / "reasoning_traces.json").exists()
 
     # Verify events were emitted for each stage
     stages_seen = {e["stage"] for e in state.events}
@@ -221,7 +228,8 @@ def test_pipeline_handles_model_load_failure(hw):
     state = create_run(config)
 
     with patch("iloptimus.core.inference.load_model", side_effect=RuntimeError("Network error")):
-        asyncio.run(run_pipeline(state.id, config, hw))
+        with patch("iloptimus.core.model_store.resolve_model_source", return_value="/tmp/mock-model"):
+            asyncio.run(run_pipeline(state.id, config, hw))
 
     assert state.status == "failed"
     assert any(e["level"] == "error" for e in state.events)
@@ -239,3 +247,53 @@ def test_server_app_creates():
     assert "/api/models" in paths
     assert "/api/tasksets" in paths
     assert "/api/runs" in paths
+    assert "/api/runs/{run_id}/artifacts" in paths
+    assert "/api/environments" in paths
+
+
+def test_no_code_environment_is_persistent_and_trainable():
+    from iloptimus.core.environments import get_environment, save_environment
+    from iloptimus.core.grader import build_prompt, grade_response
+    from iloptimus.core.tasksets import get_taskset
+
+    environment = save_environment({
+        "name": "Reliable arithmetic",
+        "mode": "RL",
+        "goal": "Answer arithmetic problems correctly and verify every result",
+        "tasks": [{
+            "name": "Addition",
+            "prompt": "What is 20 + 22?",
+            "expected_answer": "42",
+            "criteria": ["42", "verify"],
+            "difficulty": "easy",
+        }],
+    })
+
+    assert get_environment(environment["id"])["goal"] == environment["goal"]
+    assert get_taskset(environment["taskset_id"]).num_tasks == 1
+    assert "20 + 22" in build_prompt(f"custom:{environment['id']}", 0)
+    graded = grade_response(
+        f"custom:{environment['id']}",
+        0,
+        "<reasoning>I calculate and verify 20 + 22.</reasoning><answer>42</answer>",
+    )
+    assert graded.correctness == 1.0
+    assert graded.score > 0.7
+
+
+def test_model_download_creates_a_reusable_local_snapshot(tmp_path):
+    from iloptimus.core.model_store import download_model, model_status
+
+    def fake_snapshot_download(repo_id, local_dir):
+        local_dir.mkdir(parents=True, exist_ok=True)
+        (local_dir / "config.json").write_text("{}", encoding="utf-8")
+        (local_dir / "weights.safetensors").write_bytes(b"weights")
+        return str(local_dir)
+
+    with patch("iloptimus.core.model_store.snapshot_download", side_effect=fake_snapshot_download):
+        state = download_model("qwen2.5-0.5b", "int4", "mlx")
+
+    assert state.status == "downloaded"
+    persisted = model_status("qwen2.5-0.5b", "int4", "mlx")
+    assert persisted["status"] == "downloaded"
+    assert persisted["bytes_downloaded"] > 0

@@ -4,25 +4,22 @@ Run Intuition Learning (SFT + GRPO RL) pipelines locally with a web frontend.
 Detects your hardware, recommends compatible models, lets you select tasksets,
 and tracks training runs in real time.
 
-## Quick Start
+## Install and Start
 
 > **Requires Apple Silicon (M1/M2/M3/M4)** — the pipeline uses MLX for
 > inference and LoRA fine-tuning. CUDA/vLLM support is detected but not yet
 > implemented in the training path.
 
 ```bash
-# Clone
-git clone https://github.com/Vaskrokodile/iloptimus.git
-cd iloptimus
+curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
+```
 
-# Install (editable, so the taskset grader can find task definitions)
-uv sync --extra dev
+The installer installs `uv` when needed, installs IL Optimus as an isolated
+command-line app, starts the server, prints the localhost URL, and opens it in
+the default browser. Later, start it again with:
 
-# Start the server (opens browser automatically)
-uv run iloptimus serve
-
-# Or manually
-uv run iloptimus serve --host 127.0.0.1 --port 7860 --no-browser
+```bash
+iloptimus serve
 ```
 
 Then open `http://127.0.0.1:7860` in your browser.
@@ -31,14 +28,32 @@ Then open `http://127.0.0.1:7860` in your browser.
 
 1. **Detects your hardware** — CPU, RAM, GPU (Apple Silicon / CUDA / None),
    available backends (MLX, vLLM, PyTorch)
-2. **Recommends models** — 14 popular models with hardware compatibility scoring
+2. **Downloads local models** — compatible MLX checkpoints are saved locally and
+   their real installation state is shown in Model Library
    (recommended / feasible / tight / not-recommended) based on memory requirements
 3. **Browse tasksets** — 4 handcrafted IL tasksets (44 tasks total) spanning coding,
    reasoning, agentic reasoning, and agentic coding
 4. **Run IL pipelines** — SFT + GRPO RL training with live SSE streaming of logs,
    training curves (loss/reward), and accuracy progression
-5. **Track runs** — real-time progress bar, stage pipeline visualization, live log
+5. **Build no-code environments** — IL and RL specifications become persistent,
+   gradable tasksets that can be selected directly in Optimus Lab
+6. **Track runs** — real-time progress bar, stage pipeline visualization, live log
    stream, and accuracy comparison (baseline → post-SFT → post-GRPO)
+
+## Local Data
+
+All user-created data is kept outside the installed package under
+`~/.iloptimus/`:
+
+```text
+~/.iloptimus/
+├── models/          downloaded Hugging Face / MLX snapshots
+├── environments/    no-code IL and RL specifications and generated tasksets
+└── runs/<run-id>/   config, event log, metrics, traces, and LoRA adapters
+```
+
+Run `iloptimus data-dir` to print the active folder. Set `ILOPTIMUS_HOME` to
+use another location.
 
 ## Architecture
 
@@ -119,7 +134,12 @@ uv run iloptimus version            # Print version
 | GET | `/api/models/{id}` | Single model detail |
 | GET | `/api/tasksets` | All available tasksets |
 | GET | `/api/tasksets/{id}` | Single taskset detail |
-| POST | `/api/runs` | Start a new IL pipeline run |
+| POST | `/api/models/{id}/download` | Download a compatible local checkpoint |
+| GET | `/api/models/{id}/status` | Read real local/download status |
+| POST | `/api/chat` | Chat with a downloaded local model |
+| GET/POST | `/api/environments` | List or create no-code IL/RL environments |
+| POST | `/api/environments/from-chat` | Generate an environment with `/il` or `/rl` |
+| POST | `/api/runs` | Start a persisted local training run |
 | GET | `/api/runs` | List all runs |
 | GET | `/api/runs/{id}` | Get run state |
 | GET | `/api/runs/{id}/events` | SSE stream of run events |
@@ -129,10 +149,9 @@ uv run iloptimus version            # Print version
 - **MLX** (Apple Silicon) — uses `mlx_lm` for inference and LoRA
   fine-tuning. **This is the only backend currently implemented.**
   Recommended for M-series Macs with unified memory.
-- **vLLM** (CUDA) — detected and shown in the UI, but inference/training
-  code is not yet implemented. Planned.
-- **CPU** — fallback for systems without GPU acceleration (slow, small
-  models only). Not yet implemented.
+- **CUDA / CPU** — hardware is detected and reported, but release 0.2 refuses
+  to claim model download or training support on these backends. They remain a
+  future backend instead of silently falling back to simulated behavior.
 
 ## License
 

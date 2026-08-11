@@ -7,7 +7,6 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
 
 
 def main():
@@ -26,8 +25,9 @@ def main():
     # version
     subparsers.add_parser("version", help="Print version")
 
-    # hardware
-    hw_parser = subparsers.add_parser("hardware", help="Detect and print hardware info")
+    subparsers.add_parser("hardware", help="Detect and print hardware info")
+    subparsers.add_parser("doctor", help="Verify this machine can run local models and training")
+    subparsers.add_parser("data-dir", help="Print the folder containing models, environments, and runs")
 
     args = parser.parse_args()
 
@@ -36,7 +36,12 @@ def main():
         print(f"iloptimus {__version__}")
         return
 
-    if args.command == "hardware":
+    if args.command == "data-dir":
+        from .core.storage import ensure_app_dirs
+        print(ensure_app_dirs())
+        return
+
+    if args.command in {"hardware", "doctor"}:
         from .core import detect_hardware
         hw = detect_hardware()
         print(f"CPU: {hw.cpu_name} ({hw.cpu_cores} cores)")
@@ -53,6 +58,13 @@ def main():
         print(f"PyTorch: {hw.torch_available}")
         print(f"Recommended backend: {hw.recommended_backend}")
         print(f"Available memory for models: {hw.total_memory_gb:.1f} GB")
+        if args.command == "doctor":
+            print()
+            if hw.recommended_backend == "mlx" and hw.mlx_available:
+                print("Ready: local download, chat, IL, and GRPO training are available through MLX.")
+            else:
+                print("Not ready for training: IL Optimus 0.2 currently requires Apple Silicon with MLX.")
+                raise SystemExit(2)
         return
 
     if args.command == "serve" or args.command is None:
@@ -64,12 +76,15 @@ def main():
 
         print()
         print("  ╔══════════════════════════════════════════╗")
-        print("  ║          IL OPTIMUS  v0.1.0              ║")
+        from . import __version__
+        print(f"  ║          IL OPTIMUS  v{__version__:<18}║")
         print("  ║   Intuition Learning Pipeline Studio     ║")
         print("  ╚══════════════════════════════════════════╝")
         print()
-        print(f"  → Starting server at {url}")
-        print(f"  → Press Ctrl+C to stop")
+        from .core.storage import ensure_app_dirs
+        print(f"  → Local app: {url}")
+        print(f"  → Data folder: {ensure_app_dirs()}")
+        print("  → Press Ctrl+C to stop")
         print()
 
         if not no_browser:
@@ -91,6 +106,7 @@ def main():
         except ImportError:
             print("Error: uvicorn not installed. Run: pip install uvicorn")
             sys.exit(1)
+        return
 
     parser.print_help()
 

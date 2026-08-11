@@ -20,7 +20,6 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Module loading (bypasses __init__.py which imports verifiers)
@@ -50,9 +49,16 @@ _REPO_ROOT = Path(__file__).parent.parent.parent  # primeILtasks/
 
 def _taskset_path(taskset_id: str, filename: str) -> Path:
     """Get path to a file within a taskset package."""
-    # taskset_id like "il-coding-v1" -> package dir "il_coding_v1/il_coding_v1"
-    pkg_dir = _REPO_ROOT / taskset_id.replace("-", "_") / taskset_id.replace("-", "_")
-    return pkg_dir / filename
+    package_name = taskset_id.replace("-", "_")
+    package_spec = importlib.util.find_spec(package_name)
+    if package_spec and package_spec.submodule_search_locations:
+        packaged = Path(next(iter(package_spec.submodule_search_locations))) / filename
+        if packaged.exists():
+            return packaged
+    repository_path = _REPO_ROOT / package_name / package_name / filename
+    if repository_path.exists():
+        return repository_path
+    raise FileNotFoundError(f"Bundled taskset file not found: {package_name}/{filename}")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +376,28 @@ _INSTRUCTIONS = {
 
 def grade_response(domain: str, task_idx: int, response: str) -> GradedResult:
     """Grade a model response for a given taskset domain and task index."""
+    if domain.startswith("custom:"):
+        from .environments import get_environment
+
+        environment = get_environment(domain.split(":", 1)[1])
+        if not environment:
+            raise ValueError(f"Unknown custom environment: {domain}")
+        task = environment["tasks"][task_idx]
+        answer_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL | re.IGNORECASE)
+        answer = (answer_match.group(1) if answer_match else response).strip().lower()
+        expected = task.get("expected_answer", "").strip().lower()
+        criteria = task.get("criteria", [])
+        coverage = sum(term.lower() in response.lower() for term in criteria) / max(1, len(criteria))
+        correctness = (1.0 if expected in answer else 0.0) if expected else coverage
+        has_reasoning = bool(re.search(r"<reasoning>.+?</reasoning>", response, re.DOTALL | re.IGNORECASE))
+        verification = 1.0 if re.search(r"check|verif|confirm|test", response, re.IGNORECASE) else 0.0
+        reasoning_quality = min(1.0, coverage * 0.6 + float(has_reasoning) * 0.25 + verification * 0.15)
+        reward = environment["reward"]
+        score = correctness * reward["correctness"] + reasoning_quality * reward["reasoning"]
+        if correctness:
+            score += reward["efficiency"]
+        return GradedResult(score=min(1.0, score), correctness=correctness, reasoning_quality=reasoning_quality, coverage=coverage, verification=verification)
+
     grader = _GRADERS.get(domain)
     if not grader:
         raise ValueError(f"Unknown domain: {domain}")
@@ -378,8 +406,21 @@ def grade_response(domain: str, task_idx: int, response: str) -> GradedResult:
 
 def build_prompt(domain: str, task_idx: int) -> str:
     """Build the prompt for a given taskset domain and task index."""
+    if domain.startswith("custom:"):
+        from .environments import get_environment
+
+        environment = get_environment(domain.split(":", 1)[1])
+        if not environment:
+            raise ValueError(f"Unknown custom environment: {domain}")
+        task = environment["tasks"][task_idx]
+        criteria = ", ".join(task.get("criteria", [])) or "correctness and clarity"
+        return (
+            f"Environment goal: {environment['goal']}\n\n"
+            f"Complete the task below. Think inside <reasoning> tags and put the final response inside <answer> tags. "
+            f"Success criteria: {criteria}.\n\n## Task: {task['name']}\n\n{task['prompt']}"
+        )
+
     instruction = _INSTRUCTIONS.get(domain, "")
-    pkg_name = domain.replace("-", "_")
 
     if domain == "coding":
         tasks_mod = _load_module(
@@ -422,6 +463,14 @@ def build_prompt(domain: str, task_idx: int) -> str:
 
 def get_num_tasks(domain: str) -> int:
     """Get the number of tasks for a given domain."""
+    if domain.startswith("custom:"):
+        from .environments import get_environment
+
+        environment = get_environment(domain.split(":", 1)[1])
+        if not environment:
+            raise ValueError(f"Unknown custom environment: {domain}")
+        return len(environment["tasks"])
+
     pkg_map = {
         "coding": ("il_coding_tasks", "il_coding_v1", "tasks.py"),
         "reasoning": ("il_reasoning_tasks", "il_reasoning_v1", "tasks.py"),

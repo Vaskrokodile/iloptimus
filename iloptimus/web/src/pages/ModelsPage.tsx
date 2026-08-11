@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   CheckCircle2,
@@ -8,6 +9,7 @@ import {
   Filter,
   Zap,
   Cpu,
+  ArrowRight,
 } from "lucide-react";
 import {
   getModels,
@@ -34,6 +36,7 @@ const cardAnim = {
 };
 
 export default function ModelsPage() {
+  const navigate = useNavigate();
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [hw, setHw] = useState<HardwareInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +60,11 @@ export default function ModelsPage() {
     return matchesSearch && matchesFilter;
   });
 
+  const useForChat = (model: ModelInfo) => {
+    localStorage.setItem("iloptimus-chat-model", JSON.stringify({ id: model.id, name: model.name }));
+    navigate("/");
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -68,7 +76,7 @@ export default function ModelsPage() {
   return (
     <div className="space-y-6">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-        <h1 className="text-3xl font-bold tracking-tight text-fg-primary mb-2">Models</h1>
+        <h1 className="text-3xl font-bold tracking-tight text-fg-primary mb-2">Model Library</h1>
         <p className="text-fg-secondary text-sm">
           {hw && (
             <>
@@ -193,6 +201,11 @@ export default function ModelsPage() {
                   </span>
                 ))}
               </div>
+              {m.compatibility.status !== "not-recommended" && (
+                <button onClick={() => useForChat(m)} className="mt-4 w-full h-9 rounded-xl bg-accent/10 text-accent text-xs font-semibold flex items-center justify-center gap-2 hover:bg-accent/15 transition-colors">
+                  Use for chat <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              )}
             </motion.div>
           );
         })}

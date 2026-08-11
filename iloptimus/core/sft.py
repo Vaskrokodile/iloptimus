@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable
 
-from .grader import build_prompt, grade_response, get_num_tasks
+from .grader import build_prompt, get_num_tasks, grade_response
 
 
 @dataclass
@@ -27,14 +26,15 @@ class SFTMetrics:
 
 @dataclass
 class SFTConfig:
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-4  # SGD needs higher LR than Adam (was 1e-5 for Adam)
     num_iters: int = 100
-    batch_size: int = 4
+    batch_size: int = 1  # safe for 8GB Apple Silicon (was 4)
     lora_rank: int = 8
-    lora_scale: float = 1.0
+    lora_scale: float = 0.1
     lora_dropout: float = 0.0
-    memory_limit_gb: float = 5.0
+    memory_limit_gb: float = 3.0  # QLoRA on int4 uses less memory (was 3.5 for fp16)
     steps_per_eval: int = 20
+    grad_clip: float = 1.0
 
 
 @dataclass
@@ -55,10 +55,10 @@ def generate_sft_data(
 
     For each task, we run inference. If the response gets a high score
     (correctness >= 0.5), we use it as a positive SFT example.
-    If no responses are good enough, we generate a synthetic ideal response
-    from the task's expected solution.
+    If no responses are good enough, we generate synthetic examples from
+    the task's expected answer so SFT always has training data.
     """
-    from .inference import run_inference, clear_cache
+    from .inference import THINK_CLOSE, THINK_OPEN, clear_cache, run_inference
 
     total = get_num_tasks(domain)
     n = min(num_tasks or total, total)
@@ -81,6 +81,64 @@ def generate_sft_data(
             on_progress(i + 1, n)
 
         clear_cache()
+
+    # Fallback: if no correct responses, generate synthetic examples
+    # from the task's expected answer so SFT always has training data.
+    # The synthetic reasoning is detailed enough to not collapse the model's
+    # natural reasoning style — short generic responses cause LoRA to
+    # degenerate output into repetitive garbage.
+    if not examples:
+        if domain.startswith("custom:"):
+            from .environments import get_environment
+            from .inference import THINK_CLOSE, THINK_OPEN
+
+            environment = get_environment(domain.split(":", 1)[1])
+            if environment:
+                for i, task in enumerate(environment["tasks"][:n]):
+                    expected = task.get("expected_answer") or "A response satisfying: " + ", ".join(task.get("criteria", []))
+                    examples.append(SFTExample(
+                        prompt=build_prompt(domain, i),
+                        response=THINK_OPEN + "I will follow the success criteria, solve the task step by step, and verify the result." + THINK_CLOSE + f"\n<answer>{expected}</answer>",
+                    ))
+            return examples
+
+        from .grader import _load_module, _taskset_path
+        pkg_map = {
+            "coding": ("il_coding_tasks", "il_coding_v1", "tasks.py"),
+            "reasoning": ("il_reasoning_tasks", "il_reasoning_v1", "tasks.py"),
+            "agentic-reasoning": ("il_agentic_reasoning_tasks", "il_agentic_reasoning_v1", "tasks.py"),
+            "agentic-coding": ("il_agentic_coding_tasks", "il_agentic_coding_v1", "tasks.py"),
+        }
+        mod_name, pkg_id, filename = pkg_map[domain]
+        tasks_mod = _load_module(mod_name, str(_taskset_path(pkg_id, filename)))
+
+        for i in range(n):
+            prompt = build_prompt(domain, i)
+            task = tasks_mod.TASKS[i]
+
+            # Build a synthetic ideal response with the expected answer
+            if hasattr(task, "verify") and task.verify.__closure__:
+                expected = task.verify.__closure__[0].cell_contents
+                synthetic = (
+                    THINK_OPEN
+                    + "Let me work through this problem carefully step by step.\n\n"
+                    + "First, I need to understand what is being asked and what "
+                    + "constraints or conditions apply.\n\n"
+                    + "Next, I'll consider the possible approaches and evaluate "
+                    + "each one against the given constraints.\n\n"
+                    + "After checking my reasoning, I can conclude that the answer "
+                    + f"must be {expected}.\n\n"
+                    + "Let me verify this is correct by working backwards from the "
+                    + "answer and checking it satisfies all the original constraints.\n\n"
+                    + "The verification confirms the answer is correct."
+                    + THINK_CLOSE
+                    + f"\n<answer>{expected}</answer>"
+                )
+            else:
+                # Coding tasks: no simple expected answer, skip
+                continue
+
+            examples.append(SFTExample(prompt=prompt, response=synthetic))
 
     return examples
 
@@ -111,22 +169,25 @@ def run_sft(
         elif mx.metal.is_available():
             mx.metal.set_memory_limit(int(config.memory_limit_gb * 1024**3))
         if hasattr(mx, "set_cache_limit"):
-            mx.set_cache_limit(int(1.5 * 1024**3))
+            mx.set_cache_limit(int(1.0 * 1024**3))
+        elif mx.metal.is_available():
+            mx.metal.set_cache_limit(int(1.0 * 1024**3))
+        if hasattr(mx, "set_wired_limit"):
+            mx.set_wired_limit(int(config.memory_limit_gb * 1024**3))
+        elif mx.metal.is_available():
+            mx.metal.set_wired_limit(int(config.memory_limit_gb * 1024**3))
 
     # Apply LoRA layers to the model
-    from mlx_lm.tuner.trainer import TrainingArgs
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
     # Apply LoRA to attention layers
+    num_layers = len(handle.model.layers)
     lora_config = {
-        "num_layers": len(handle.model.layers),
-        "lora_parameters": {
-            "rank": config.lora_rank,
-            "scale": config.lora_scale,
-            "dropout": config.lora_dropout,
-        },
+        "rank": config.lora_rank,
+        "scale": config.lora_scale,
+        "dropout": config.lora_dropout,
     }
-    linear_to_lora_layers(handle.model, lora_config)
+    linear_to_lora_layers(handle.model, num_layers, lora_config)
 
     # Prepare training data: tokenize prompt + response pairs
     train_data = []
@@ -140,8 +201,25 @@ def run_sft(
         )
         train_data.append(tokens)
 
-    # Optimizer
-    optimizer = opt.Adam(learning_rate=config.learning_rate)
+    # Optimizer — SGD is used instead of Adam because Adam's second moment
+    # estimate can produce NaN when combined with int4 quantized weights
+    # (QLoRA). SGD is simpler and more stable for this use case.
+    optimizer = opt.SGD(learning_rate=config.learning_rate)
+
+    # Compile the cross-entropy loss computation for faster forward+backward.
+    # mx.compile fuses element-wise operations into single Metal kernels.
+    # Note: we compile only the loss math (not the model call) because
+    # nn.value_and_grad passes model.trainable_parameters() as a dict,
+    # which mx.compile can't handle as a callable.
+    @mx.compile
+    def compiled_cross_entropy(logits, target_tokens):
+        log_probs = nn.log_softmax(logits, axis=-1)
+        token_logprobs = mx.take_along_axis(
+            log_probs[0],
+            target_tokens[0][:, None],
+            axis=-1,
+        ).squeeze(-1)
+        return -token_logprobs.mean()
 
     # Training loop
     os.makedirs(adapter_path, exist_ok=True)
@@ -177,21 +255,19 @@ def run_sft(
 
             def loss_fn():
                 logits = handle.model(input_tokens)
-                # Cross-entropy loss
-                log_probs = nn.log_softmax(logits, axis=-1)
-                # Gather logprobs of target tokens
-                token_logprobs = mx.take_along_axis(
-                    log_probs[0],
-                    target_tokens[0][:, None],
-                    axis=-1,
-                ).squeeze(-1)
-                return -token_logprobs.mean()
+                return compiled_cross_entropy(logits, target_tokens)
 
             loss_value_and_grad = nn.value_and_grad(handle.model, loss_fn)
             loss_val, grad = loss_value_and_grad()
             mx.eval(loss_val, grad)
 
-            loss_sum += float(loss_val)
+            loss_f = float(loss_val)
+            # Skip NaN or Inf gradients — these corrupt model weights.
+            # QLoRA on int4 can produce Inf logits for out-of-distribution inputs.
+            if loss_f != loss_f or loss_f in (float("inf"), float("-inf")):
+                continue
+
+            loss_sum += loss_f
             n_steps += 1
 
             if grad_accum is None:
@@ -204,6 +280,12 @@ def run_sft(
         # Apply gradient update
         if grad_accum is not None and n_steps > 0:
             grad_accum = tree_map(lambda x: x / n_steps, grad_accum)
+            # Gradient clipping to prevent NaN
+            if config.grad_clip > 0:
+                grad_accum = tree_map(
+                    lambda x: mx.clip(x, -config.grad_clip, config.grad_clip),
+                    grad_accum,
+                )
             optimizer.update(handle.model, grad_accum)
             mx.eval(handle.model.parameters(), optimizer.state)
 

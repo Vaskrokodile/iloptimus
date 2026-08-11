@@ -16,7 +16,7 @@ Algorithm:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -41,15 +41,16 @@ class GRPOMetrics:
 
 @dataclass
 class GRPOConfig:
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-4  # SGD needs higher LR than Adam (was 1e-5 for Adam)
     clip_eps: float = 0.2
     group_size: int = 4
-    thinking_tokens: int = 256
-    prediction_tokens: int = 256
+    thinking_tokens: int = 1024  # enough for DeepSeek-R1-Distill to finish reasoning
+    prediction_tokens: int = 256  # enough for a detailed answer
     temperature: float = 0.6
     top_p: float = 0.9
     kl_beta: float = 0.04
-    memory_limit_gb: float = 5.0
+    memory_limit_gb: float = 3.0  # QLoRA on int4 uses less memory (was 3.5 for fp16)
+    grad_clip: float = 1.0
 
 
 # DeepSeek-R1-Distill think tokens
@@ -220,13 +221,23 @@ class GRPOTrainer:
         adapter_path: str = "il_grpo_adapters",
     ):
         import mlx.core as mx
-        import mlx.nn as nn
         import mlx.optimizers as opt
 
         self.model = model
         self.tokenizer = tokenizer
         self.config = config or GRPOConfig()
         self.adapter_path = adapter_path
+
+        # Check if the model already has LoRA layers. If not, apply them.
+        # Without LoRA, nn.value_and_grad would compute gradients for ALL
+        # ~1.5B parameters → ~12GB of gradients + optimizer state → OOM on 8GB Mac.
+        has_lora = any("lora" in k.lower() for k, _ in model.named_modules())
+        if not has_lora:
+            from mlx_lm.tuner.utils import linear_to_lora_layers
+            num_layers = len(model.layers)
+            lora_config = {"rank": 8, "scale": 1.0, "dropout": 0.0}
+            linear_to_lora_layers(model, num_layers, lora_config)
+            print(f"GRPO: Applied LoRA layers (rank 8) to {num_layers} layers")
 
         # Memory limits
         if self.config.memory_limit_gb > 0:
@@ -235,15 +246,16 @@ class GRPOTrainer:
             elif mx.metal.is_available():
                 mx.metal.set_memory_limit(int(self.config.memory_limit_gb * 1024**3))
             if hasattr(mx, "set_cache_limit"):
-                mx.set_cache_limit(int(1.5 * 1024**3))
+                mx.set_cache_limit(int(1.0 * 1024**3))
             elif mx.metal.is_available():
-                mx.metal.set_cache_limit(int(1.5 * 1024**3))
+                mx.metal.set_cache_limit(int(1.0 * 1024**3))
             if hasattr(mx, "set_wired_limit"):
                 mx.set_wired_limit(int(self.config.memory_limit_gb * 1024**3))
             elif mx.metal.is_available():
                 mx.metal.set_wired_limit(int(self.config.memory_limit_gb * 1024**3))
 
-        self.optimizer = opt.Adam(learning_rate=self.config.learning_rate)
+        # SGD — Adam's second moment estimate produces NaN with int4 QLoRA
+        self.optimizer = opt.SGD(learning_rate=self.config.learning_rate)
         self.iteration = 0
 
     def train_step(
@@ -264,7 +276,7 @@ class GRPOTrainer:
         """
         import mlx.core as mx
         import mlx.nn as nn
-        from mlx.utils import tree_flatten, tree_map
+        from mlx.utils import tree_map
 
         t0 = time.time()
 
@@ -325,7 +337,12 @@ class GRPOTrainer:
             loss_val, grad = loss_value_and_grad()
 
             mx.eval(loss_val, grad)
-            loss_sum += float(loss_val)
+            loss_f = float(loss_val)
+            # Skip NaN or Inf gradients — these corrupt model weights
+            if loss_f != loss_f or loss_f in (float("inf"), float("-inf")):
+                continue
+
+            loss_sum += loss_f
             n_updated += 1
 
             if grad_accum is None:
@@ -338,6 +355,12 @@ class GRPOTrainer:
         # Apply gradient update
         if grad_accum is not None and n_updated > 0:
             grad_accum = tree_map(lambda x: x / n_updated, grad_accum)
+            # Gradient clipping to prevent NaN
+            if self.config.grad_clip > 0:
+                grad_accum = tree_map(
+                    lambda x: mx.clip(x, -self.config.grad_clip, self.config.grad_clip),
+                    grad_accum,
+                )
             self.optimizer.update(self.model, grad_accum)
             mx.eval(self.model.parameters(), self.optimizer.state)
 
@@ -356,13 +379,13 @@ class GRPOTrainer:
 
         metrics = GRPOMetrics(
             iteration=self.iteration,
-            mean_reward=mean_reward,
-            std_reward=std_reward,
-            max_reward=max(rewards),
-            min_reward=min(rewards),
-            mean_correctness=np.mean([r['reward'] for r in rollouts]),
+            mean_reward=float(mean_reward) if mean_reward == mean_reward else 0.0,
+            std_reward=float(std_reward) if std_reward == std_reward else 0.0,
+            max_reward=max(rewards) if rewards else 0.0,
+            min_reward=min(rewards) if rewards else 0.0,
+            mean_correctness=float(np.mean([r['reward'] for r in rollouts])) if rollouts else 0.0,
             mean_reasoning_quality=0.0,  # filled by caller if available
-            loss=loss_sum / max(n_updated, 1),
+            loss=loss_sum / max(n_updated, 1) if n_updated > 0 else 0.0,
             rollout_time=rollout_time,
             update_time=update_time,
             total_time=total_time,
@@ -374,12 +397,17 @@ class GRPOTrainer:
             on_metrics(metrics)
 
         self.iteration += 1
+
+        # Clear cache between iterations to prevent memory accumulation
+        mx.clear_cache()
+
         return metrics
 
     def save(self, path: str | None = None):
         """Save LoRA adapter weights."""
         import json
         import os
+
         import mlx.core as mx
         from mlx.utils import tree_flatten
 
@@ -389,10 +417,14 @@ class GRPOTrainer:
         mx.save_safetensors(f"{path}/adapters.safetensors", adapter_weights)
         ckpt = f"{path}/{self.iteration:07d}_adapters.safetensors"
         mx.save_safetensors(ckpt, adapter_weights)
+        # Detect the actual number of layers — hardcoding 16 when the model
+        # has 28 (DeepSeek-R1-Distill-Qwen-1.5B) causes load_adapters to apply
+        # LoRA to only 16/28 layers, producing a shape mismatch crash on reload.
+        num_layers = len(self.model.layers)
         cfg = {
             "adapter_path": os.path.basename(path),
             "fine_tune_type": "lora",
-            "num_layers": 16,
+            "num_layers": num_layers,
             "lora_parameters": {"rank": 8, "scale": 1.0, "dropout": 0.0},
         }
         with open(f"{path}/adapter_config.json", "w") as f:

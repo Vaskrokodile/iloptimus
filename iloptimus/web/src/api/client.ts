@@ -42,6 +42,18 @@ export interface ModelInfo {
   description: string;
   tags: string[];
   compatibility: CompatibilityInfo;
+  local: ModelLocalStatus;
+}
+
+export interface ModelLocalStatus {
+  model_id: string;
+  precision: string;
+  repository: string;
+  status: "not-downloaded" | "queued" | "downloading" | "downloaded" | "failed";
+  path: string;
+  bytes_downloaded: number;
+  size_gb: number;
+  error: string;
 }
 
 export interface TasksetInfo {
@@ -54,6 +66,31 @@ export interface TasksetInfo {
   needs_sandbox: boolean;
   tags: string[];
   eval_config: Record<string, number>;
+}
+
+export interface EnvironmentTask {
+  id?: string;
+  name: string;
+  prompt: string;
+  expected_answer: string;
+  criteria: string[];
+  difficulty: string;
+}
+
+export interface EnvironmentSpec {
+  id: string;
+  taskset_id: string;
+  name: string;
+  mode: "IL" | "RL";
+  goal: string;
+  description: string;
+  domain: string;
+  interaction: { observation: string; action: string; max_steps: number };
+  reward: { correctness: number; reasoning: number; efficiency: number; method: string };
+  tasks: EnvironmentTask[];
+  status: string;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface RunConfig {
@@ -70,6 +107,8 @@ export interface RunConfig {
   max_seq_length: number;
   benchmark_tasks: number;
   rollouts_per_example: number;
+  max_reasoning_tokens: number;
+  max_answer_tokens: number;
 }
 
 export interface RunState {
@@ -86,6 +125,7 @@ export interface RunState {
   sft_loss_history: number[];
   grpo_reward_history: number[];
   config: RunConfig;
+  artifact_dir: string;
 }
 
 export interface LogEvent {
@@ -110,6 +150,59 @@ export async function getHardware(): Promise<HardwareInfo> {
 
 export async function getModels(): Promise<ModelInfo[]> {
   return fetchJSON("/api/models");
+}
+
+export async function downloadModel(modelId: string, precision?: string): Promise<ModelLocalStatus> {
+  const res = await fetch(`/api/models/${modelId}/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ precision }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getModelStatus(modelId: string): Promise<ModelLocalStatus> {
+  return fetchJSON(`/api/models/${modelId}/status`);
+}
+
+export async function sendChat(modelId: string, message: string, history: Array<{ role: string; text: string }>): Promise<{ answer: string; tokens_per_sec: number }> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId, message, history }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getEnvironments(): Promise<EnvironmentSpec[]> {
+  return fetchJSON("/api/environments");
+}
+
+export async function saveEnvironment(environment: Partial<EnvironmentSpec>): Promise<EnvironmentSpec> {
+  const res = await fetch("/api/environments", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(environment),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteEnvironment(environmentId: string): Promise<void> {
+  const res = await fetch(`/api/environments/${environmentId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function createEnvironmentFromChat(mode: "IL" | "RL", description: string, modelId: string): Promise<EnvironmentSpec> {
+  const res = await fetch("/api/environments/from-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode, description, model_id: modelId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export async function getTasksets(): Promise<TasksetInfo[]> {

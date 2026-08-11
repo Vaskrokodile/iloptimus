@@ -75,9 +75,11 @@ export default function ILStudioPage() {
 
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [selectedTaskset, setSelectedTaskset] = useState<string>("");
-  const [sftIters, setSftIters] = useState(100);
-  const [grpoIters, setGrpoIters] = useState(50);
+  const [sftIters, setSftIters] = useState(10);
+  const [grpoIters, setGrpoIters] = useState(5);
   const [grpoGroupSize, setGrpoGroupSize] = useState(4);
+  const [precision, setPrecision] = useState<string>("");
+  const [benchmarkTasks, setBenchmarkTasks] = useState(5);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -151,9 +153,11 @@ export default function ILStudioPage() {
       const result = await createRun({
         model_id: selectedModel,
         taskset_id: selectedTaskset,
+        precision: precision || undefined,
         sft_iters: sftIters,
         grpo_iters: grpoIters,
         grpo_group_size: grpoGroupSize,
+        benchmark_tasks: benchmarkTasks,
       });
       setActiveRunId(result.id);
       setEvents([]);
@@ -292,14 +296,39 @@ export default function ILStudioPage() {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden"
                     >
-                      <div className="mt-3">
-                        <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">GRPO Group Size</label>
-                        <input
-                          type="number"
-                          value={grpoGroupSize}
-                          onChange={(e) => setGrpoGroupSize(Number(e.target.value))}
-                          className="input-base w-full"
-                        />
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">Precision</label>
+                          <select
+                            value={precision}
+                            onChange={(e) => setPrecision(e.target.value)}
+                            className="input-base w-full"
+                          >
+                            <option value="">Auto (recommended)</option>
+                            <option value="int4">int4 (fastest, ~1GB)</option>
+                            <option value="int8">int8 (~2GB)</option>
+                            <option value="fp16">fp16 (~3GB)</option>
+                          </select>
+                          <p className="text-xs text-fg-muted mt-1">int4 loads instantly if cached. fp16 may require a 3GB download.</p>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">Benchmark Tasks</label>
+                          <input
+                            type="number"
+                            value={benchmarkTasks}
+                            onChange={(e) => setBenchmarkTasks(Number(e.target.value))}
+                            className="input-base w-full"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">GRPO Group Size</label>
+                          <input
+                            type="number"
+                            value={grpoGroupSize}
+                            onChange={(e) => setGrpoGroupSize(Number(e.target.value))}
+                            className="input-base w-full"
+                          />
+                        </div>
                       </div>
                     </motion.div>
                   )}

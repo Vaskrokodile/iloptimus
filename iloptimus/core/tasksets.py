@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
-import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 
@@ -78,7 +74,7 @@ TASKSET_REGISTRY: list[dict] = [
 
 
 def get_all_tasksets() -> list[TasksetInfo]:
-    return [
+    builtins = [
         TasksetInfo(
             id=t["id"],
             name=t["name"],
@@ -93,6 +89,24 @@ def get_all_tasksets() -> list[TasksetInfo]:
         )
         for t in TASKSET_REGISTRY
     ]
+    from .environments import list_environments
+
+    custom = [
+        TasksetInfo(
+            id=environment["taskset_id"],
+            name=environment["name"],
+            package_name=f"user_environment_{environment['id'].replace('-', '_')}",
+            path=str(environment["id"]),
+            domain=f"custom:{environment['id']}",
+            description=environment["description"],
+            num_tasks=len(environment["tasks"]),
+            needs_sandbox=False,
+            tags=[environment["mode"].lower(), "custom", environment["domain"]],
+            eval_config={"num_examples": len(environment["tasks"]), "rollouts_per_example": 4},
+        )
+        for environment in list_environments()
+    ]
+    return builtins + custom
 
 
 def get_taskset(taskset_id: str) -> Optional[TasksetInfo]:

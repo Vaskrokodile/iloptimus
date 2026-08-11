@@ -15,6 +15,7 @@ Events are streamed via asyncio queues for the frontend to consume.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import functools
 import json
 import time
@@ -25,7 +26,8 @@ from typing import AsyncGenerator, Optional
 
 from .hardware import HardwareInfo
 from .models import ModelInfo, get_model
-from .tasksets import TasksetInfo, get_taskset
+from .storage import atomic_write_json, run_dir, runs_dir
+from .tasksets import get_taskset
 
 
 class RunStatus(str, Enum):
@@ -53,17 +55,17 @@ class RunConfig:
     taskset_id: str
     backend: str = "mlx"
     precision: str = "int4"
-    sft_iters: int = 100
-    sft_lr: float = 1e-4
-    grpo_iters: int = 50
-    grpo_group_size: int = 4
-    grpo_lr: float = 1e-5
+    sft_iters: int = 20  # reduced from 100 — SFT just teaches format, GRPO does the heavy lifting
+    sft_lr: float = 1e-3  # SGD with higher LR for visible changes
+    grpo_iters: int = 10  # reduced from 50 — research shows diminishing returns after 10-20 iters
+    grpo_group_size: int = 2  # reduced from 4 — 2-GRPO matches 16-GRPO per recent research
+    grpo_lr: float = 1e-3  # SGD with higher LR for visible changes
     grpo_temperature: float = 0.6
-    max_seq_length: int = 768
+    max_seq_length: int = 512
     benchmark_tasks: int = 12
     rollouts_per_example: int = 4
-    max_reasoning_tokens: int = 512
-    max_answer_tokens: int = 512
+    max_reasoning_tokens: int = 256  # reduced from 512 — most IL tasks don't need 512 reasoning tokens
+    max_answer_tokens: int = 128  # reduced from 512 — answers are short
 
 
 @dataclass
@@ -94,8 +96,17 @@ class RunState:
     post_grpo_accuracy: float = 0.0
     sft_loss_history: list[float] = field(default_factory=list)
     grpo_reward_history: list[float] = field(default_factory=list)
+    # Reasoning traces for before/after comparison
+    baseline_traces: list[dict] = field(default_factory=list)
+    post_sft_traces: list[dict] = field(default_factory=list)
+    post_grpo_traces: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Sanitize NaN/inf to 0.0 — JSON doesn't support non-finite floats
+        def _safe(v):
+            if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+                return 0.0
+            return v
         return {
             "id": self.id,
             "status": self.status,
@@ -103,18 +114,57 @@ class RunState:
             "progress": self.progress,
             "started_at": self.started_at,
             "elapsed_seconds": self.elapsed_seconds,
+            "events": self.events,
             "metrics": self.metrics,
-            "baseline_accuracy": self.baseline_accuracy,
-            "post_sft_accuracy": self.post_sft_accuracy,
-            "post_grpo_accuracy": self.post_grpo_accuracy,
-            "sft_loss_history": self.sft_loss_history,
-            "grpo_reward_history": self.grpo_reward_history,
+            "baseline_accuracy": _safe(self.baseline_accuracy),
+            "post_sft_accuracy": _safe(self.post_sft_accuracy),
+            "post_grpo_accuracy": _safe(self.post_grpo_accuracy),
+            "sft_loss_history": [_safe(x) for x in self.sft_loss_history],
+            "grpo_reward_history": [_safe(x) for x in self.grpo_reward_history],
+            "baseline_traces": self.baseline_traces,
+            "post_sft_traces": self.post_sft_traces,
+            "post_grpo_traces": self.post_grpo_traces,
             "config": asdict(self.config),
+            "artifact_dir": str(run_dir(self.id)),
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict) -> "RunState":
+        fields = {
+            key: value for key, value in payload.items()
+            if key in cls.__dataclass_fields__ and key != "config"
+        }
+        return cls(config=RunConfig(**payload["config"]), **fields)
 
-_runs: dict[str, RunState] = {}
+
+def _load_saved_runs() -> dict[str, RunState]:
+    saved: dict[str, RunState] = {}
+    root = runs_dir()
+    if not root.exists():
+        return saved
+    for path in root.glob("*/run.json"):
+        try:
+            state = RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, TypeError, KeyError):
+            continue
+        if state.status in {"pending", "running"}:
+            state.status = "failed"
+            state.events.append(LogEvent(
+                timestamp=time.time(),
+                stage=state.stage,
+                level="error",
+                message="Run was interrupted when IL Optimus stopped",
+            ).to_dict())
+        saved[state.id] = state
+    return saved
+
+
+_runs: dict[str, RunState] = _load_saved_runs()
 _event_queues: dict[str, asyncio.Queue] = {}
+
+
+def _persist_state(state: RunState) -> None:
+    atomic_write_json(run_dir(state.id) / "run.json", state.to_dict())
 
 
 def create_run(config: RunConfig) -> RunState:
@@ -122,6 +172,10 @@ def create_run(config: RunConfig) -> RunState:
     state = RunState(id=run_id, config=config, started_at=time.time())
     _runs[run_id] = state
     _event_queues[run_id] = asyncio.Queue()
+    folder = run_dir(run_id)
+    folder.mkdir(parents=True, exist_ok=False)
+    atomic_write_json(folder / "config.json", asdict(config))
+    _persist_state(state)
     return state
 
 
@@ -130,7 +184,7 @@ def get_run(run_id: str) -> Optional[RunState]:
 
 
 def get_all_runs() -> list[RunState]:
-    return list(_runs.values())
+    return sorted(_runs.values(), key=lambda state: state.started_at, reverse=True)
 
 
 def _emit(run_id: str, stage: str, level: str, message: str, **data) -> LogEvent:
@@ -138,6 +192,11 @@ def _emit(run_id: str, stage: str, level: str, message: str, **data) -> LogEvent
     state = _runs.get(run_id)
     if state:
         state.events.append(event.to_dict())
+        events_path = run_dir(run_id) / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        _persist_state(state)
     queue = _event_queues.get(run_id)
     if queue:
         queue.put_nowait(event.to_dict())
@@ -168,14 +227,20 @@ async def _update_progress(run_id: str, progress: float, stage: str = ""):
         if stage:
             state.stage = stage
         state.elapsed_seconds = time.time() - state.started_at
+        _persist_state(state)
+
+
+# Single-thread executor for MLX operations — MLX arrays are thread-local
+# and cannot be shared across threads, so all MLX work must run on the same thread
+_mlx_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
 
 
 async def _run_in_executor(func, *args, **kwargs):
-    """Run a sync function in the thread pool to avoid blocking the event loop."""
+    """Run a sync function in the single-thread MLX executor to avoid blocking the event loop."""
     loop = asyncio.get_running_loop()
     if kwargs:
         func = functools.partial(func, **kwargs)
-    return await loop.run_in_executor(None, func, *args)
+    return await loop.run_in_executor(_mlx_executor, func, *args)
 
 
 # ---------------------------------------------------------------------------
@@ -183,21 +248,33 @@ async def _run_in_executor(func, *args, **kwargs):
 # ---------------------------------------------------------------------------
 
 async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) -> object:
-    """Stage 2: Load the model via mlx_lm."""
+    """Stage 2: Load the model via mlx_lm.
+
+    Uses QLoRA — trains directly on int4 quantized models without dequantization.
+    MLX's QuantizedLinear supports gradients natively, saving ~15s dequant time
+    and ~2.3GB memory (int4 is 1.2GB vs fp16 is 3.5GB).
+    """
     from .inference import load_model
+    from .model_store import resolve_model_source
 
     _emit(run_id, "loading-model", "info", f"Loading {model.huggingface_id} ({config.precision})...")
     await _update_progress(run_id, 0.05, "loading-model")
+
+    source = resolve_model_source(model.id, config.precision, config.backend)
+    if not source:
+        raise RuntimeError("Model is not downloaded. Open Model Library and download it first.")
 
     handle = await _run_in_executor(
         load_model,
         huggingface_id=model.huggingface_id,
         precision=config.precision,
+        dequantize=False,  # QLoRA — no dequantization needed
+        source_override=source,
     )
 
     _emit(
         run_id, "loading-model", "success",
-        f"Model loaded: {model.name} ({config.precision}, ~{model.int4_gb if config.precision == 'int4' else model.fp16_gb:.1f}GB)",
+        f"Model loaded: {model.name} ({config.precision} QLoRA, ~{model.int4_gb if config.precision == 'int4' else model.fp16_gb:.1f}GB)",
     )
     await _update_progress(run_id, 0.1, "loading-model")
     return handle
@@ -205,11 +282,16 @@ async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) ->
 
 async def _benchmark_stage(
     run_id: str, config: RunConfig, handle, domain: str, phase: str, progress_start: float, progress_end: float,
-) -> float:
-    """Run a real benchmark: inference + grading on each task."""
-    from .benchmark import run_benchmark
+) -> tuple[float, list[dict]]:
+    """Run a real benchmark: inference + grading on each task.
 
-    n = config.benchmark_tasks
+    Returns (accuracy, reasoning_traces) where reasoning_traces is a list of
+    dicts with task_idx, reasoning, answer, score, correctness for each task.
+    """
+    from .benchmark import run_benchmark
+    from .grader import get_num_tasks
+
+    n = min(config.benchmark_tasks, get_num_tasks(domain))
     _emit(run_id, f"benchmarking-{phase}", "info", f"Running {phase} benchmark on {n} tasks...")
     await _update_progress(run_id, progress_start, f"benchmarking-{phase}")
 
@@ -236,6 +318,21 @@ async def _benchmark_stage(
         on_task_complete=on_task_complete,
     )
 
+    # Capture reasoning traces for before/after comparison
+    traces = [
+        {
+            "task_idx": r.task_idx,
+            "reasoning": r.reasoning,
+            "answer": r.answer,
+            "score": r.score,
+            "correctness": r.correctness,
+            "reasoning_quality": r.reasoning_quality,
+            "forced_answer": r.forced_answer,
+            "tokens_generated": r.tokens_generated,
+        }
+        for r in result.task_results
+    ]
+
     _emit(
         run_id, f"benchmarking-{phase}", "success",
         f"[{phase}] Accuracy: {result.accuracy:.1%} | Mean score: {result.mean_score:.3f} | Tokens/s: {result.mean_tokens_per_sec:.1f}",
@@ -245,7 +342,7 @@ async def _benchmark_stage(
         peak_memory_gb=result.peak_memory_gb,
     )
     await _update_progress(run_id, progress_end, f"benchmarking-{phase}")
-    return result.accuracy
+    return result.accuracy, traces
 
 
 async def _emit_and_progress(run_id, stage, idx, total, result, acc, p_start, p_end):
@@ -262,7 +359,7 @@ async def _emit_and_progress(run_id, stage, idx, total, result, acc, p_start, p_
 
 async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tuple[list[float], str]:
     """Stage 4: Run real SFT training."""
-    from .sft import generate_sft_data, run_sft, SFTConfig
+    from .sft import SFTConfig, generate_sft_data, run_sft
 
     _emit(run_id, "sft-training", "info", "Generating SFT training data from benchmark traces...")
     await _update_progress(run_id, 0.2, "sft-training")
@@ -283,17 +380,19 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         on_progress=on_data_progress,
     )
 
-    _emit(run_id, "sft-training", "info", f"Generated {len(examples)} SFT examples from correct responses")
+    _emit(run_id, "sft-training", "info", f"Generated {len(examples)} SFT examples")
 
     if not examples:
-        _emit(run_id, "sft-training", "warn", "No correct responses found for SFT — skipping SFT stage")
+        _emit(run_id, "sft-training", "warn", "No SFT examples could be generated — skipping SFT stage")
         return [0.0], None
 
     # Run SFT training
     sft_config = SFTConfig(
         learning_rate=config.sft_lr,
         num_iters=config.sft_iters,
-        memory_limit_gb=5.0,
+        memory_limit_gb=3.0,  # QLoRA uses less memory (int4 is 1.2GB vs fp16 3.5GB)
+        lora_scale=0.05,  # reduced from 0.1 — less aggressive to avoid model collapse
+        grad_clip=1.0,
     )
 
     losses: list[float] = []
@@ -311,7 +410,7 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         handle,
         examples,
         config=sft_config,
-        adapter_path=f"il_sft_adapters_{run_id}",
+        adapter_path=str(run_dir(run_id) / "adapters" / "sft"),
         on_metrics=on_sft_metrics,
     )
 
@@ -333,8 +432,8 @@ async def _emit_sft_metrics(run_id, metrics, total):
 
 async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapter_path: str | None) -> list[float]:
     """Stage 6: Run real GRPO RL training."""
-    from .grpo import GRPOTrainer, GRPOConfig
-    from .grader import build_prompt, grade_response, get_num_tasks
+    from .grader import build_prompt, get_num_tasks, grade_response
+    from .grpo import GRPOConfig, GRPOTrainer
 
     _emit(run_id, "grpo-training", "info", f"Starting GRPO RL training ({config.grpo_iters} iterations)...")
     _emit(run_id, "grpo-training", "info", f"Group size: {config.grpo_group_size} | Temperature: {config.grpo_temperature}")
@@ -356,7 +455,7 @@ async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapt
         handle.model,
         handle.tokenizer,
         grpo_config,
-        f"il_grpo_adapters_{run_id}",
+        str(run_dir(run_id) / "adapters" / "grpo"),
     )
 
     rewards: list[float] = []
@@ -450,32 +549,35 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         handle = await _load_model_stage(run_id, config, model)
 
         # ---- Stage 3: Baseline benchmark ----
-        baseline_acc = await _benchmark_stage(
+        baseline_acc, baseline_traces = await _benchmark_stage(
             run_id, config, handle, domain, "baseline", 0.1, 0.2,
         )
         state.baseline_accuracy = baseline_acc
+        state.baseline_traces = baseline_traces
         state.metrics["baseline_accuracy"] = baseline_acc
+        _emit(run_id, "benchmarking-baseline", "info",
+              f"Captured {len(baseline_traces)} baseline reasoning traces for comparison")
 
         # ---- Stage 4: SFT training ----
         sft_losses, sft_adapter_path = await _sft_stage(run_id, config, handle, domain)
         state.sft_loss_history = sft_losses
 
         # ---- Stage 5: Post-SFT benchmark ----
-        # If we have SFT adapters, reload the model with them
+        # Hot-swap SFT adapters onto the already-loaded model — no reload needed
         if sft_adapter_path:
-            from .inference import load_model
-            _emit(run_id, "benchmarking-post-sft", "info", "Reloading model with SFT adapters...")
-            handle = await _run_in_executor(
-                load_model,
-                huggingface_id=model.huggingface_id,
-                precision=config.precision,
-                adapter_path=sft_adapter_path,
+            from .inference import swap_adapters
+            _emit(run_id, "benchmarking-post-sft", "info", "Swapping to SFT adapters (no model reload)...")
+            handle.model = await _run_in_executor(
+                swap_adapters,
+                handle.model,
+                sft_adapter_path,
             )
 
-        post_sft_acc = await _benchmark_stage(
+        post_sft_acc, post_sft_traces = await _benchmark_stage(
             run_id, config, handle, domain, "post-sft", 0.45, 0.55,
         )
         state.post_sft_accuracy = post_sft_acc
+        state.post_sft_traces = post_sft_traces
         improvement = post_sft_acc - baseline_acc
         _emit(
             run_id, "benchmarking-post-sft", "success",
@@ -490,21 +592,21 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         state.grpo_reward_history = grpo_rewards
 
         # ---- Stage 7: Post-GRPO benchmark ----
-        # Reload with GRPO adapters
-        grpo_adapter_path = f"il_grpo_adapters_{run_id}"
-        from .inference import load_model
-        _emit(run_id, "benchmarking-post-grpo", "info", "Reloading model with GRPO adapters...")
-        handle = await _run_in_executor(
-            load_model,
-            huggingface_id=model.huggingface_id,
-            precision=config.precision,
-            adapter_path=grpo_adapter_path,
+        # Hot-swap GRPO adapters — no model reload needed
+        grpo_adapter_path = str(run_dir(run_id) / "adapters" / "grpo")
+        from .inference import swap_adapters
+        _emit(run_id, "benchmarking-post-grpo", "info", "Swapping to GRPO adapters (no model reload)...")
+        handle.model = await _run_in_executor(
+            swap_adapters,
+            handle.model,
+            grpo_adapter_path,
         )
 
-        post_grpo_acc = await _benchmark_stage(
+        post_grpo_acc, post_grpo_traces = await _benchmark_stage(
             run_id, config, handle, domain, "post-grpo", 0.85, 0.95,
         )
         state.post_grpo_accuracy = post_grpo_acc
+        state.post_grpo_traces = post_grpo_traces
         total_improvement = post_grpo_acc - baseline_acc
         _emit(
             run_id, "benchmarking-post-grpo", "success",
@@ -520,6 +622,24 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
             f"IL pipeline complete! {baseline_acc:.1%} -> {post_grpo_acc:.1%} ({total_improvement:+.1%})",
             baseline=baseline_acc, final=post_grpo_acc, improvement=total_improvement,
         )
+
+        # Save reasoning traces to a file for before/after comparison
+        traces_path = run_dir(run_id) / "reasoning_traces.json"
+        traces_data = {
+            "run_id": run_id,
+            "model": model.name,
+            "taskset": taskset.name,
+            "domain": domain,
+            "baseline_accuracy": baseline_acc,
+            "post_sft_accuracy": post_sft_acc,
+            "post_grpo_accuracy": post_grpo_acc,
+            "baseline_traces": baseline_traces,
+            "post_sft_traces": post_sft_traces,
+            "post_grpo_traces": post_grpo_traces,
+        }
+        atomic_write_json(traces_path, traces_data)
+        _emit(run_id, "done", "info", f"Reasoning traces saved to {traces_path}", traces_file=str(traces_path))
+
         state.status = "completed"
         await _update_progress(run_id, 1.0, "done")
 
@@ -531,3 +651,5 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         _emit(run_id, state.stage, "error", f"Pipeline failed: {e}", error=str(e))
         import traceback
         _emit(run_id, state.stage, "error", traceback.format_exc())
+    finally:
+        _persist_state(state)

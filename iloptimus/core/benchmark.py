@@ -15,8 +15,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .grader import grade_response, build_prompt, get_num_tasks
-from .inference import ModelHandle, run_inference, clear_cache, get_memory_info
+from .grader import build_prompt, get_num_tasks, grade_response
+from .inference import ModelHandle, clear_cache, get_memory_info, run_inference
 
 
 @dataclass
@@ -30,6 +30,8 @@ class TaskResult:
     tokens_per_sec: float
     forced_answer: bool
     response_preview: str  # first 200 chars of response
+    reasoning: str = ""  # full reasoning trace
+    answer: str = ""  # full answer text
 
 
 @dataclass
@@ -99,6 +101,8 @@ def run_benchmark(
             tokens_per_sec=inf.tokens_per_sec,
             forced_answer=inf.forced_answer,
             response_preview=inf.text[:200],
+            reasoning=inf.reasoning,
+            answer=inf.answer,
         )
         results.append(task_result)
 

@@ -19,3 +19,9 @@ node_modules/
 # Env
 .env
 .venv/
+
+# Local IL Optimus experiment outputs
+il_sft_adapters_*/
+il_grpo_adapters_*/
+il_reasoning_traces_*.json
+run_*_events.log
