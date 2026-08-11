@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-FRAMEWORK_VERSION = 2
+FRAMEWORK_VERSION = 3
 SUPPORTED_GRADERS = {"exact", "numeric", "contains_all"}
 PLACEHOLDER_TEXT = {
     "concrete task",
@@ -221,6 +221,20 @@ def score_task(task: dict[str, Any], response: str) -> dict[str, float]:
         "reasoning_quality": reasoning_quality,
         "verification": verification,
     }
+
+
+def score_environment_task(environment: dict[str, Any], task_index: int, response: str) -> float:
+    if environment.get("kind") == "state-machine":
+        from .stateful_environments import simulate_response
+
+        return float(simulate_response(environment, task_index, response)["score"])
+    metrics = score_task(environment["tasks"][task_index], response)
+    weights = environment["reward"]
+    score = metrics["correctness"] * weights["correctness"]
+    score += metrics["reasoning_quality"] * weights["reasoning"]
+    if metrics["correctness"]:
+        score += weights["efficiency"]
+    return min(1.0, score)
 
 
 def scaffold_tasks(description: str) -> list[dict[str, Any]]:

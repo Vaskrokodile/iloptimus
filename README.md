@@ -61,6 +61,21 @@ in **My environments**, and is registered immediately as a taskset in Optimus
 Lab. Training uses the same grader for baseline evaluation, GRPO rollouts, and
 post-training evaluation; IL demonstrations feed directly into LoRA SFT.
 
+### Stateful simulator environments
+
+Agent-style `/rl` goals can compile to framework-v3 state machines rather than
+single responses. A simulator defines primitive state values, named actions,
+action preconditions, safe effects, observations, terminal conditions, shaped
+step rewards, invalid-action penalties, timeouts, and multiple initial-state
+scenarios. The local API exposes real reset/step execution, and **My
+environments → Test** provides an interactive episode console.
+
+During training, the model emits an action trajectory. IL Optimus replays every
+action through the same simulator, stops at terminal states, and feeds the
+executed trajectory reward into benchmarking and GRPO. Built-in navigation,
+tool-workflow, and resource-control templates give small local models a trusted
+starting point without allowing generated code or external side effects.
+
 ## Local Data
 
 All user-created data is kept outside the installed package under

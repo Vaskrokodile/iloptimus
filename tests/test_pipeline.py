@@ -284,6 +284,8 @@ def test_server_app_creates():
     assert "/api/runs" in paths
     assert "/api/runs/{run_id}/artifacts" in paths
     assert "/api/environments" in paths
+    assert "/api/environments/{environment_id}/simulate/reset" in paths
+    assert "/api/environments/{environment_id}/simulate/step" in paths
 
 
 def test_no_code_environment_is_persistent_and_trainable():
@@ -388,7 +390,7 @@ def test_il_environment_compiles_curated_examples_and_runtime_package():
         assert len(examples) == 1
         assert examples[0].response == environment["tasks"][0]["ideal_response"]
         folder = environments_dir() / environment["id"]
-        assert "score_task" in (folder / "taskset.py").read_text(encoding="utf-8")
+        assert "score_environment_task" in (folder / "taskset.py").read_text(encoding="utf-8")
         assert "Supported graders" in (folder / "SKILL.md").read_text(encoding="utf-8")
         spec = importlib.util.spec_from_file_location("generated_taskset", folder / "taskset.py")
         module = importlib.util.module_from_spec(spec)
@@ -416,3 +418,54 @@ def test_model_download_creates_a_reusable_local_snapshot(tmp_path):
     persisted = model_status("qwen2.5-0.5b", "int4", "mlx")
     assert persisted["status"] == "downloaded"
     assert persisted["bytes_downloaded"] > 0
+
+
+def test_state_machine_runtime_reset_step_and_trajectory():
+    from iloptimus.core.stateful_environments import StateMachineRuntime, scaffold_simulator, simulate_response
+
+    simulator = scaffold_simulator("Train a robot to navigate a grid to its goal")
+    runtime = StateMachineRuntime(simulator, 1)
+    assert runtime.state == {"position": 0, "energy": 4, "goal": 3}
+    first = runtime.step("move_forward")
+    assert first.state["position"] == 1
+    assert first.reward > 0
+    runtime.step("move_forward")
+    final = runtime.step("move_forward")
+    assert final.terminated is True
+    assert final.success is True
+    assert final.outcome == "goal_reached"
+    partial = simulate_response({"simulator": simulator}, 2, '<answer>["move_forward"]</answer>')
+    assert 0 < partial["score"] < 0.8
+
+
+def test_stateful_environment_is_registered_and_trainable():
+    from iloptimus.core.environments import delete_environment, save_environment
+    from iloptimus.core.grader import build_prompt, grade_response
+    from iloptimus.core.stateful_environments import scaffold_simulator
+    from iloptimus.core.tasksets import get_taskset
+
+    environment = save_environment(
+        {
+            "name": "Robot grid navigation",
+            "mode": "RL",
+            "kind": "state-machine",
+            "goal": "Train a robot agent to navigate forward until it reaches a target position",
+            "simulator": scaffold_simulator("robot navigate grid"),
+        }
+    )
+    try:
+        assert environment["kind"] == "state-machine"
+        assert len(environment["tasks"]) == 3
+        assert get_taskset(environment["taskset_id"]).num_tasks == 3
+        prompt = build_prompt(f"custom:{environment['id']}", 1)
+        assert "Available actions" in prompt
+        graded = grade_response(
+            f"custom:{environment['id']}",
+            1,
+            '<reasoning>Advance three times.</reasoning><answer>["move_forward", "move_forward", "move_forward"]</answer>',
+        )
+        assert graded.correctness == 1.0
+        assert graded.score > 0.8
+        assert graded.info["final_state"]["position"] == 3
+    finally:
+        delete_environment(environment["id"])

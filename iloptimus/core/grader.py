@@ -382,6 +382,19 @@ def grade_response(domain: str, task_idx: int, response: str) -> GradedResult:
         environment = get_environment(domain.split(":", 1)[1])
         if not environment:
             raise ValueError(f"Unknown custom environment: {domain}")
+        if environment.get("kind") == "state-machine":
+            from .stateful_environments import simulate_response
+
+            simulation = simulate_response(environment, task_idx, response)
+            score = float(simulation["score"])
+            return GradedResult(
+                score=score,
+                correctness=float(simulation["success"]),
+                reasoning_quality=score,
+                coverage=score,
+                verification=float(simulation["success"]),
+                info=simulation,
+            )
         task = environment["tasks"][task_idx]
         metrics = score_task(task, response)
         reward = environment["reward"]
@@ -411,6 +424,10 @@ def build_prompt(domain: str, task_idx: int) -> str:
         environment = get_environment(domain.split(":", 1)[1])
         if not environment:
             raise ValueError(f"Unknown custom environment: {domain}")
+        if environment.get("kind") == "state-machine":
+            from .stateful_environments import build_stateful_prompt
+
+            return build_stateful_prompt(environment, task_idx)
         task = environment["tasks"][task_idx]
         criteria = ", ".join(task.get("criteria", [])) or "correctness and clarity"
         return (

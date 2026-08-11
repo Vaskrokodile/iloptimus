@@ -77,17 +77,52 @@ export interface EnvironmentTask {
   difficulty: string;
 }
 
+export interface SimulatorAction {
+  name: string;
+  description: string;
+}
+
+export interface SimulatorScenario {
+  name: string;
+  initial_state: Record<string, string | number | boolean>;
+  solution: string[];
+}
+
+export interface SimulatorSpec {
+  template_id: string;
+  observation: string;
+  state: Record<string, string | number | boolean>;
+  actions: SimulatorAction[];
+  max_steps: number;
+  scenarios: SimulatorScenario[];
+}
+
+export interface SimulationStep {
+  session_id?: string;
+  observation: string;
+  state: Record<string, string | number | boolean>;
+  reward: number;
+  terminated: boolean;
+  success: boolean;
+  outcome: string;
+  step: number;
+  valid: boolean;
+  actions: string[];
+}
+
 export interface EnvironmentSpec {
   id: string;
   taskset_id: string;
   name: string;
   mode: "IL" | "RL";
+  kind?: "task" | "state-machine";
   goal: string;
   description: string;
   domain: string;
   interaction: { observation: string; action: string; max_steps: number };
   reward: { correctness: number; reasoning: number; efficiency: number; method: string };
   tasks: EnvironmentTask[];
+  simulator?: SimulatorSpec;
   status: string;
   created_at: number;
   updated_at: number;
@@ -180,6 +215,10 @@ export async function getEnvironments(): Promise<EnvironmentSpec[]> {
   return fetchJSON("/api/environments");
 }
 
+export async function getEnvironment(environmentId: string): Promise<EnvironmentSpec> {
+  return fetchJSON(`/api/environments/${environmentId}`);
+}
+
 export async function saveEnvironment(environment: Partial<EnvironmentSpec>): Promise<EnvironmentSpec> {
   const res = await fetch("/api/environments", {
     method: "POST",
@@ -200,6 +239,26 @@ export async function createEnvironmentFromChat(mode: "IL" | "RL", description: 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode, description, model_id: modelId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function resetSimulation(environmentId: string, scenario = 0): Promise<SimulationStep> {
+  const res = await fetch(`/api/environments/${environmentId}/simulate/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scenario }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function stepSimulation(environmentId: string, sessionId: string, action: string): Promise<SimulationStep> {
+  const res = await fetch(`/api/environments/${environmentId}/simulate/step`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, action }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

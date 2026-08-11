@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,6 +52,13 @@ from .core.model_store import (
     resolve_model_source,
 )
 from .core.pipeline import _run_in_executor
+from .core.stateful_environments import (
+    StateMachineRuntime,
+    is_stateful_request,
+    new_session_id,
+    scaffold_simulator,
+    simulate_response,
+)
 from .core.storage import app_home, ensure_app_dirs
 
 
@@ -88,6 +96,7 @@ _hw_cache = None
 _chat_models: dict[str, ModelHandle] = {}
 _chat_model_lock = asyncio.Lock()
 _download_tasks: dict[str, asyncio.Task] = {}
+_sim_sessions: dict[str, tuple[str, StateMachineRuntime]] = {}
 
 
 def _get_hardware():
@@ -327,6 +336,36 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Environment not found")
         return {"deleted": True}
 
+    @app.post("/api/environments/{environment_id}/simulate/reset")
+    async def reset_simulation(environment_id: str, payload: dict[str, Any]):
+        environment = get_environment(environment_id)
+        if not environment or environment.get("kind") != "state-machine":
+            raise HTTPException(404, "State-machine environment not found")
+        runtime = StateMachineRuntime(environment["simulator"], int(payload.get("scenario", 0)))
+        session_id = new_session_id()
+        if len(_sim_sessions) >= 128:
+            _sim_sessions.pop(next(iter(_sim_sessions)))
+        _sim_sessions[session_id] = (environment_id, runtime)
+        return {"session_id": session_id, **asdict(runtime.reset(runtime.scenario_index))}
+
+    @app.post("/api/environments/{environment_id}/simulate/step")
+    async def step_simulation(environment_id: str, payload: dict[str, Any]):
+        session_id = str(payload.get("session_id") or "")
+        session = _sim_sessions.get(session_id)
+        if not session or session[0] != environment_id:
+            raise HTTPException(404, "Simulation session not found; reset the episode")
+        try:
+            return asdict(session[1].step(str(payload.get("action") or "")))
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @app.post("/api/environments/{environment_id}/simulate/trajectory")
+    async def simulate_trajectory(environment_id: str, payload: dict[str, Any]):
+        environment = get_environment(environment_id)
+        if not environment or environment.get("kind") != "state-machine":
+            raise HTTPException(404, "State-machine environment not found")
+        return simulate_response(environment, int(payload.get("scenario", 0)), str(payload.get("response") or ""))
+
     @app.post("/api/environments/from-chat")
     async def create_environment_from_chat(payload: dict[str, Any]):
         mode = str(payload.get("mode", "IL")).upper()
@@ -353,6 +392,12 @@ def create_app() -> FastAPI:
                 )
                 _chat_models.clear()
                 _chat_models[model_id] = handle
+            if is_stateful_request(description):
+                generated = draft_environment(mode, description)
+                generated["kind"] = "state-machine"
+                generated["simulator"] = scaffold_simulator(description)
+                generated["builder"] = {"model_id": model_id, "used_model_output": False}
+                return save_environment(generated)
             tasks = []
             issues = []
             for difficulty in ("easy", "medium", "hard"):
