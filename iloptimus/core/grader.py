@@ -111,6 +111,7 @@ CODE_BLOCK_RE = re.compile(r"```python:([^\n]+)\n(.*?)```", re.DOTALL)
 # Graded result
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GradedResult:
     score: float  # final IL score (0.0 to 1.0)
@@ -125,14 +126,13 @@ class GradedResult:
 # Sandbox runner (replaces verifiers Runtime)
 # ---------------------------------------------------------------------------
 
+
 def _run_sandbox(script_path: str, payload: dict, timeout: float) -> dict:
     """Run a verify.py script in a subprocess with a JSON payload.
 
     Writes payload to a temp file, runs the script, reads JSON output.
     """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, dir="/tmp"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir="/tmp") as f:
         json.dump(payload, f)
         payload_path = f.name
 
@@ -166,6 +166,7 @@ def _run_sandbox(script_path: str, payload: dict, timeout: float) -> dict:
 # Taskset graders
 # ---------------------------------------------------------------------------
 
+
 def grade_coding(response: str, task_idx: int) -> GradedResult:
     """Grade a coding task response."""
     tasks_mod = _load_module(
@@ -192,9 +193,7 @@ def grade_coding(response: str, task_idx: int) -> GradedResult:
     correctness = test_result.get("pass_rate", 0.0)
 
     # Anti-laziness penalty
-    laziness = scoring_mod.detect_laziness(
-        code, task.required_params, task.required_constructs
-    )
+    laziness = scoring_mod.detect_laziness(code, task.required_params, task.required_constructs)
     if laziness.score > 0:
         correctness *= max(0.2, 1.0 - laziness.score * 0.8)
 
@@ -377,26 +376,26 @@ _INSTRUCTIONS = {
 def grade_response(domain: str, task_idx: int, response: str) -> GradedResult:
     """Grade a model response for a given taskset domain and task index."""
     if domain.startswith("custom:"):
+        from .environment_framework import score_task
         from .environments import get_environment
 
         environment = get_environment(domain.split(":", 1)[1])
         if not environment:
             raise ValueError(f"Unknown custom environment: {domain}")
         task = environment["tasks"][task_idx]
-        answer_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL | re.IGNORECASE)
-        answer = (answer_match.group(1) if answer_match else response).strip().lower()
-        expected = task.get("expected_answer", "").strip().lower()
-        criteria = task.get("criteria", [])
-        coverage = sum(term.lower() in response.lower() for term in criteria) / max(1, len(criteria))
-        correctness = (1.0 if expected in answer else 0.0) if expected else coverage
-        has_reasoning = bool(re.search(r"<reasoning>.+?</reasoning>", response, re.DOTALL | re.IGNORECASE))
-        verification = 1.0 if re.search(r"check|verif|confirm|test", response, re.IGNORECASE) else 0.0
-        reasoning_quality = min(1.0, coverage * 0.6 + float(has_reasoning) * 0.25 + verification * 0.15)
+        metrics = score_task(task, response)
         reward = environment["reward"]
-        score = correctness * reward["correctness"] + reasoning_quality * reward["reasoning"]
-        if correctness:
+        score = metrics["correctness"] * reward["correctness"]
+        score += metrics["reasoning_quality"] * reward["reasoning"]
+        if metrics["correctness"]:
             score += reward["efficiency"]
-        return GradedResult(score=min(1.0, score), correctness=correctness, reasoning_quality=reasoning_quality, coverage=coverage, verification=verification)
+        return GradedResult(
+            score=min(1.0, score),
+            correctness=metrics["correctness"],
+            reasoning_quality=metrics["reasoning_quality"],
+            coverage=metrics["coverage"],
+            verification=metrics["verification"],
+        )
 
     grader = _GRADERS.get(domain)
     if not grader:
@@ -452,10 +451,7 @@ def build_prompt(domain: str, task_idx: int) -> str:
             str(_taskset_path("il_agentic_coding_v1", "tasks.py")),
         )
         task = tasks_mod.TASKS[task_idx]
-        codebase_str = "\n\n".join(
-            f"### {fname}\n```python\n{content}```"
-            for fname, content in task.codebase.items()
-        )
+        codebase_str = "\n\n".join(f"### {fname}\n```python\n{content}```" for fname, content in task.codebase.items())
         return instruction + f"## Task: {task.name}\n\n{task.spec}\n\n## Codebase\n\n{codebase_str}"
 
     raise ValueError(f"Unknown domain: {domain}")

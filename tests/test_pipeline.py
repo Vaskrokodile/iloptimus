@@ -31,6 +31,7 @@ from iloptimus.core.inference import InferenceResult, ModelHandle
 def isolated_app_home(tmp_path, monkeypatch):
     monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path / "iloptimus-home"))
 
+
 def test_grader_reasoning_wrong_answer():
     """A wrong answer should get score 0 with low reasoning quality."""
     result = grade_response("reasoning", 0, "<reasoning>blah</reasoning><answer>42</answer>")
@@ -42,9 +43,9 @@ def test_grader_reasoning_wrong_answer():
 def test_grader_coding_bad_code():
     """A bad code response should get low correctness via sandbox verification."""
     result = grade_response(
-        "coding", 0,
-        "<reasoning>I will write a function</reasoning>"
-        "<answer>```python\ndef foo(): pass\n```</answer>",
+        "coding",
+        0,
+        "<reasoning>I will write a function</reasoning><answer>```python\ndef foo(): pass\n```</answer>",
     )
     assert result.correctness == 0.0
     assert "test_result" in result.info
@@ -62,6 +63,7 @@ def test_grader_all_domains_load():
 # ---------------------------------------------------------------------------
 # Pipeline orchestration test (mocked model)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def hw():
@@ -107,9 +109,15 @@ def mock_benchmark_result(mock_inference_result):
         peak_memory_gb=1.0,
         task_results=[
             TaskResult(
-                task_idx=0, score=0.3, correctness=0.5, reasoning_quality=0.4,
-                elapsed=0.1, tokens_generated=20, tokens_per_sec=200.0,
-                forced_answer=False, response_preview="...",
+                task_idx=0,
+                score=0.3,
+                correctness=0.5,
+                reasoning_quality=0.4,
+                elapsed=0.1,
+                tokens_generated=20,
+                tokens_per_sec=200.0,
+                forced_answer=False,
+                response_preview="...",
             ),
         ],
     )
@@ -144,6 +152,7 @@ def test_pipeline_runs_all_stages(hw, mock_handle, mock_benchmark_result):
 
     def fake_generate_sft_data(handle, **kwargs):
         from iloptimus.core.sft import SFTExample
+
         on_progress = kwargs.get("on_progress")
         if on_progress:
             on_progress(1, 1)
@@ -152,39 +161,62 @@ def test_pipeline_runs_all_stages(hw, mock_handle, mock_benchmark_result):
     def fake_run_sft(handle, examples, **kwargs):
         on_metrics = kwargs.get("on_metrics")
         from iloptimus.core.sft import SFTMetrics
+
         if on_metrics:
             for i in range(kwargs.get("config").num_iters):
-                on_metrics(SFTMetrics(
-                    iteration=i, loss=1.0 - i * 0.1, learning_rate=1e-4,
-                    elapsed=0.01, peak_memory_gb=1.0,
-                ))
+                on_metrics(
+                    SFTMetrics(
+                        iteration=i,
+                        loss=1.0 - i * 0.1,
+                        learning_rate=1e-4,
+                        elapsed=0.01,
+                        peak_memory_gb=1.0,
+                    )
+                )
         adapter_path = kwargs.get("adapter_path", "il_sft_adapters_test")
         sft_adapters.append(adapter_path)
         return adapter_path
 
     def fake_grpo_train_step(prompt, grade_fn, on_metrics=None, **kwargs):
         from iloptimus.core.grpo import GRPOMetrics
+
         metrics = GRPOMetrics(
-            iteration=0, mean_reward=0.5, std_reward=0.1, max_reward=0.6,
-            min_reward=0.4, mean_correctness=0.5, mean_reasoning_quality=0.4,
-            loss=0.3, rollout_time=0.1, update_time=0.1, total_time=0.2,
-            peak_memory_gb=1.0, avg_episode_tokens=100.0,
+            iteration=0,
+            mean_reward=0.5,
+            std_reward=0.1,
+            max_reward=0.6,
+            min_reward=0.4,
+            mean_correctness=0.5,
+            mean_reasoning_quality=0.4,
+            loss=0.3,
+            rollout_time=0.1,
+            update_time=0.1,
+            total_time=0.2,
+            peak_memory_gb=1.0,
+            avg_episode_tokens=100.0,
         )
         if on_metrics:
             on_metrics(metrics)
         return metrics
 
-    with patch("iloptimus.core.inference.load_model", side_effect=fake_load_model), \
-         patch("iloptimus.core.model_store.resolve_model_source", return_value="/tmp/mock-model"), \
-         patch("iloptimus.core.inference.swap_adapters", side_effect=lambda model, path: model), \
-         patch("iloptimus.core.benchmark.run_benchmark", side_effect=fake_run_benchmark), \
-         patch("iloptimus.core.sft.generate_sft_data", side_effect=fake_generate_sft_data), \
-         patch("iloptimus.core.sft.run_sft", side_effect=fake_run_sft), \
-         patch("iloptimus.core.grpo.GRPOTrainer") as MockTrainer, \
-         patch("iloptimus.core.grader.build_prompt", return_value="test prompt"), \
-         patch("iloptimus.core.grader.grade_response", return_value=GradedResult(
-             score=0.5, correctness=0.5, reasoning_quality=0.4,
-         )):
+    with (
+        patch("iloptimus.core.inference.load_model", side_effect=fake_load_model),
+        patch("iloptimus.core.model_store.resolve_model_source", return_value="/tmp/mock-model"),
+        patch("iloptimus.core.inference.swap_adapters", side_effect=lambda model, path: model),
+        patch("iloptimus.core.benchmark.run_benchmark", side_effect=fake_run_benchmark),
+        patch("iloptimus.core.sft.generate_sft_data", side_effect=fake_generate_sft_data),
+        patch("iloptimus.core.sft.run_sft", side_effect=fake_run_sft),
+        patch("iloptimus.core.grpo.GRPOTrainer") as MockTrainer,
+        patch("iloptimus.core.grader.build_prompt", return_value="test prompt"),
+        patch(
+            "iloptimus.core.grader.grade_response",
+            return_value=GradedResult(
+                score=0.5,
+                correctness=0.5,
+                reasoning_quality=0.4,
+            ),
+        ),
+    ):
         # Mock GRPOTrainer instance
         trainer_instance = MockTrainer.return_value
         trainer_instance.train_step = fake_grpo_train_step
@@ -203,6 +235,7 @@ def test_pipeline_runs_all_stages(hw, mock_handle, mock_benchmark_result):
     assert len(state.grpo_reward_history) == 2
     assert state.metrics["total_improvement"] == 0.0
     from iloptimus.core.storage import run_dir
+
     assert (run_dir(state.id) / "run.json").exists()
     assert (run_dir(state.id) / "reasoning_traces.json").exists()
 
@@ -239,8 +272,10 @@ def test_pipeline_handles_model_load_failure(hw):
 # Server tests
 # ---------------------------------------------------------------------------
 
+
 def test_server_app_creates():
     from iloptimus.server import create_app
+
     app = create_app()
     paths = {r.path for r in app.routes if hasattr(r, "path")}
     assert "/api/health" in paths
@@ -256,18 +291,22 @@ def test_no_code_environment_is_persistent_and_trainable():
     from iloptimus.core.grader import build_prompt, grade_response
     from iloptimus.core.tasksets import get_taskset
 
-    environment = save_environment({
-        "name": "Reliable arithmetic",
-        "mode": "RL",
-        "goal": "Answer arithmetic problems correctly and verify every result",
-        "tasks": [{
-            "name": "Addition",
-            "prompt": "What is 20 + 22?",
-            "expected_answer": "42",
-            "criteria": ["42", "verify"],
-            "difficulty": "easy",
-        }],
-    })
+    environment = save_environment(
+        {
+            "name": "Reliable arithmetic",
+            "mode": "RL",
+            "goal": "Answer arithmetic problems correctly and verify every result",
+            "tasks": [
+                {
+                    "name": "Addition",
+                    "prompt": "What is 20 + 22?",
+                    "expected_answer": "42",
+                    "criteria": ["42", "verify"],
+                    "difficulty": "easy",
+                }
+            ],
+        }
+    )
 
     assert get_environment(environment["id"])["goal"] == environment["goal"]
     assert get_taskset(environment["taskset_id"]).num_tasks == 1
@@ -279,6 +318,86 @@ def test_no_code_environment_is_persistent_and_trainable():
     )
     assert graded.correctness == 1.0
     assert graded.score > 0.7
+
+
+def test_environment_framework_parses_and_grades_deterministically():
+    from iloptimus.core.environment_framework import (
+        build_design_prompt,
+        design_issues,
+        extract_json_object,
+        score_task,
+    )
+
+    prompt = build_design_prompt("RL", "Teach reliable arithmetic with verifiable rewards")
+    assert "Supported graders" in prompt
+    assert "Mode: RL" in prompt
+    assert extract_json_object('notes before {"name":"Arithmetic"} after') == {"name": "Arithmetic"}
+
+    exact_task = {
+        "expected_answer": "42",
+        "criteria": ["verify"],
+        "grader": {"type": "exact", "target": "42"},
+    }
+    assert score_task(exact_task, "<answer>42</answer>")["correctness"] == 1.0
+    assert score_task(exact_task, "<answer>142</answer>")["correctness"] == 0.0
+
+    numeric_task = {
+        "expected_answer": "3.14",
+        "criteria": [],
+        "grader": {"type": "numeric", "target": 3.14, "tolerance": 0.01},
+    }
+    assert score_task(numeric_task, "<answer>3.141</answer>")["correctness"] == 1.0
+    assert "tasks must contain between 3 and 6 items" in design_issues({"tasks": [exact_task]})
+
+    from iloptimus.core.environment_framework import scaffold_tasks
+
+    scaffold = scaffold_tasks("Teach a model to multiply small integers and verify using division")
+    assert len(scaffold) == 3
+    assert scaffold[2]["expected_answer"] == "42"
+    assert score_task(scaffold[2], scaffold[2]["ideal_response"])["correctness"] == 1.0
+
+
+def test_il_environment_compiles_curated_examples_and_runtime_package():
+    import importlib.util
+
+    from iloptimus.core.environments import delete_environment, save_environment
+    from iloptimus.core.sft import generate_sft_data
+    from iloptimus.core.storage import environments_dir
+
+    environment = save_environment(
+        {
+            "name": "Curated arithmetic demonstrations",
+            "mode": "IL",
+            "goal": "Teach the model to solve and verify short arithmetic problems",
+            "tasks": [
+                {
+                    "name": "Addition",
+                    "prompt": "What is 19 + 23?",
+                    "expected_answer": "42",
+                    "ideal_response": "<reasoning>19 + 23 = 42. I verify by subtraction.</reasoning><answer>42</answer>",
+                    "criteria": ["verify"],
+                    "grader": {"type": "exact", "target": "42"},
+                    "difficulty": "easy",
+                }
+            ],
+        }
+    )
+
+    try:
+        examples = generate_sft_data(None, f"custom:{environment['id']}")
+        assert len(examples) == 1
+        assert examples[0].response == environment["tasks"][0]["ideal_response"]
+        folder = environments_dir() / environment["id"]
+        assert "score_task" in (folder / "taskset.py").read_text(encoding="utf-8")
+        assert "Supported graders" in (folder / "SKILL.md").read_text(encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("generated_taskset", folder / "taskset.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        generated_task = module.GeneratedTaskset().load()[0]
+        assert generated_task.prompt == "What is 19 + 23?"
+        assert generated_task.score("<answer>42</answer>") >= 0.7
+    finally:
+        delete_environment(environment["id"])
 
 
 def test_model_download_creates_a_reusable_local_snapshot(tmp_path):

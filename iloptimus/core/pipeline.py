@@ -533,10 +533,17 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         return
 
     domain = taskset.domain
+    pipeline_mode = "IL + RL"
+    if domain.startswith("custom:"):
+        from .environments import get_environment
+
+        environment = get_environment(domain.split(":", 1)[1])
+        if environment:
+            pipeline_mode = environment["mode"]
 
     try:
         # ---- Stage 1: Initializing ----
-        _emit(run_id, "initializing", "info", f"Starting IL pipeline: {model.name} on {taskset.name}")
+        _emit(run_id, "initializing", "info", f"Starting {pipeline_mode} pipeline: {model.name} on {taskset.name}")
         _emit(run_id, "initializing", "info", f"Backend: {config.backend} | Precision: {config.precision}")
         _emit(run_id, "initializing", "info", f"Hardware: {hw.gpu.name} ({hw.total_memory_gb:.1f}GB available)")
         _emit(run_id, "initializing", "info", f"SFT: {config.sft_iters} iters @ lr={config.sft_lr}")

@@ -40,6 +40,27 @@ Then open `http://127.0.0.1:7860` in your browser.
 6. **Track runs** — real-time progress bar, stage pipeline visualization, live log
    stream, and accuracy comparison (baseline → post-SFT → post-GRPO)
 
+## How No-Code Environments Work
+
+Type `/il <goal>` or `/rl <goal>` after selecting a downloaded model. IL Optimus
+asks the local model for small task proposals, validates them, and compiles the
+result into a versioned environment. Small models never write or execute Python:
+they fill a constrained contract described in
+`iloptimus/resources/environment-builder/SKILL.md`.
+
+The trusted runtime supplies the parts that must be reliable:
+
+- three to six self-contained tasks and prompts
+- curated `ideal_response` demonstrations for IL/SFT
+- deterministic `exact`, `numeric`, or `contains_all` graders for RL/GRPO
+- benchmark prompts, reward weights, and an executable taskset adapter
+- a validated fallback template when the local model's proposal is malformed
+
+Every generated environment is saved under `~/.iloptimus/environments/`, appears
+in **My environments**, and is registered immediately as a taskset in Optimus
+Lab. Training uses the same grader for baseline evaluation, GRPO rollouts, and
+post-training evaluation; IL demonstrations feed directly into LoRA SFT.
+
 ## Local Data
 
 All user-created data is kept outside the installed package under

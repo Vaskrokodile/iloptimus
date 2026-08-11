@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,6 +30,11 @@ from .core import (
     get_run,
     get_taskset,
     run_pipeline,
+)
+from .core.environment_framework import (
+    build_task_prompt,
+    extract_json_object,
+    task_issues,
 )
 from .core.environments import (
     delete_environment,
@@ -133,28 +137,30 @@ def create_app() -> FastAPI:
         for m in get_all_models():
             compat = check_compatibility(m, hw)
             precision = compatible_precision(m, hw)
-            result.append({
-                "id": m.id,
-                "name": m.name,
-                "huggingface_id": m.huggingface_id,
-                "params_b": m.params_b,
-                "fp16_gb": m.fp16_gb,
-                "int8_gb": m.int8_gb,
-                "int4_gb": m.int4_gb,
-                "family": m.family,
-                "context_length": m.context_length,
-                "backends": m.backends,
-                "description": m.description,
-                "tags": m.tags,
-                "local": model_status(m.id, precision, hw.recommended_backend),
-                "compatibility": {
-                    "status": compat.status,
-                    "best_precision": compat.best_precision,
-                    "best_precision_gb": compat.best_precision_gb,
-                    "reason": compat.reason,
-                    "score": compat.score,
-                },
-            })
+            result.append(
+                {
+                    "id": m.id,
+                    "name": m.name,
+                    "huggingface_id": m.huggingface_id,
+                    "params_b": m.params_b,
+                    "fp16_gb": m.fp16_gb,
+                    "int8_gb": m.int8_gb,
+                    "int4_gb": m.int4_gb,
+                    "family": m.family,
+                    "context_length": m.context_length,
+                    "backends": m.backends,
+                    "description": m.description,
+                    "tags": m.tags,
+                    "local": model_status(m.id, precision, hw.recommended_backend),
+                    "compatibility": {
+                        "status": compat.status,
+                        "best_precision": compat.best_precision,
+                        "best_precision_gb": compat.best_precision_gb,
+                        "reason": compat.reason,
+                        "score": compat.score,
+                    },
+                }
+            )
         return result
 
     @app.get("/api/models/{model_id}")
@@ -244,8 +250,7 @@ def create_app() -> FastAPI:
 
             context = req.history[-8:]
             prompt = "\n".join(
-                [f"{item.get('role', 'user')}: {item.get('text', '')}" for item in context]
-                + [f"user: {req.message}"]
+                [f"{item.get('role', 'user')}: {item.get('text', '')}" for item in context] + [f"user: {req.message}"]
             )
             result = await _run_in_executor(
                 run_inference,
@@ -329,8 +334,6 @@ def create_app() -> FastAPI:
         model_id = str(payload.get("model_id", ""))
         if mode not in {"IL", "RL"} or len(description) < 12:
             raise HTTPException(400, "Use /il or /rl followed by a clear environment goal")
-        design_prompt = f"""Design a no-code {mode} training environment from this request: {description}
-Return only one JSON object with: name, goal, description, domain, interaction (observation, action, max_steps), reward (correctness, reasoning, efficiency, method), and tasks. Tasks must be a list of 3 objects with name, prompt, expected_answer, criteria, difficulty. Make every task concrete and gradable."""
         async with _chat_model_lock:
             handle = _chat_models.get(model_id)
             if handle is None:
@@ -350,20 +353,41 @@ Return only one JSON object with: name, goal, description, domain, interaction (
                 )
                 _chat_models.clear()
                 _chat_models[model_id] = handle
-            result = await _run_in_executor(run_inference, handle, design_prompt, 512, 512)
-        raw = result.answer or result.text
-        generated = None
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            try:
-                generated = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                generated = None
-        try:
-            environment = save_environment(draft_environment(mode, description, generated))
-        except ValueError:
-            environment = save_environment(draft_environment(mode, description))
-        return environment
+            tasks = []
+            issues = []
+            for difficulty in ("easy", "medium", "hard"):
+                task = None
+                issues = []
+                for _ in range(2):
+                    generation_prompt = build_task_prompt(
+                        mode,
+                        description,
+                        difficulty,
+                        [item["prompt"] for item in tasks],
+                        issues,
+                    )
+                    result = await _run_in_executor(run_inference, handle, generation_prompt, 96, 384)
+                    task = extract_json_object(result.answer or result.text)
+                    if isinstance(task, dict) and isinstance(task.get("task"), dict):
+                        task = task["task"]
+                    if isinstance(task, dict) and isinstance(task.get("tasks"), list) and task["tasks"]:
+                        task = task["tasks"][0]
+                    issues = task_issues(task) if isinstance(task, dict) else ["response did not contain a task object"]
+                    if isinstance(task, dict) and task.get("prompt") in {item["prompt"] for item in tasks}:
+                        issues.append("task duplicates an earlier prompt")
+                    if not issues:
+                        task["difficulty"] = difficulty
+                        tasks.append(task)
+                        break
+                if issues:
+                    break
+
+        generated = draft_environment(mode, description)
+        used_model_output = not issues and len(tasks) == 3
+        if used_model_output:
+            generated["tasks"] = tasks
+        generated["builder"] = {"model_id": model_id, "used_model_output": used_model_output}
+        return save_environment(generated)
 
     # ---- Run management ----
 
@@ -494,6 +518,7 @@ Return only one JSON object with: name, goal, description, domain, interaction (
             # Fallback to index.html for SPA routing
             return FileResponse(str(web_dist / "index.html"))
     else:
+
         @app.get("/", response_class=HTMLResponse)
         async def no_frontend():
             return HTMLResponse(

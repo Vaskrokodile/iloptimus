@@ -64,10 +64,26 @@ def generate_sft_data(
     n = min(num_tasks or total, total)
     examples: list[SFTExample] = []
 
+    if domain.startswith("custom:"):
+        from .environments import get_environment
+
+        environment = get_environment(domain.split(":", 1)[1])
+        if environment and environment["mode"] == "IL":
+            for i, task in enumerate(environment["tasks"][:n]):
+                ideal_response = task.get("ideal_response", "").strip()
+                if not ideal_response:
+                    continue
+                examples.append(SFTExample(prompt=build_prompt(domain, i), response=ideal_response))
+                if on_progress:
+                    on_progress(i + 1, n)
+            if examples:
+                return examples
+
     for i in range(n):
         prompt = build_prompt(domain, i)
         inf = run_inference(
-            handle, prompt,
+            handle,
+            prompt,
             max_reasoning_tokens=max_reasoning_tokens,
             max_answer_tokens=max_answer_tokens,
         )
@@ -95,14 +111,22 @@ def generate_sft_data(
             environment = get_environment(domain.split(":", 1)[1])
             if environment:
                 for i, task in enumerate(environment["tasks"][:n]):
-                    expected = task.get("expected_answer") or "A response satisfying: " + ", ".join(task.get("criteria", []))
-                    examples.append(SFTExample(
-                        prompt=build_prompt(domain, i),
-                        response=THINK_OPEN + "I will follow the success criteria, solve the task step by step, and verify the result." + THINK_CLOSE + f"\n<answer>{expected}</answer>",
-                    ))
+                    expected = task.get("expected_answer") or "A response satisfying: " + ", ".join(
+                        task.get("criteria", [])
+                    )
+                    examples.append(
+                        SFTExample(
+                            prompt=build_prompt(domain, i),
+                            response=THINK_OPEN
+                            + "I will follow the success criteria, solve the task step by step, and verify the result."
+                            + THINK_CLOSE
+                            + f"\n<answer>{expected}</answer>",
+                        )
+                    )
             return examples
 
         from .grader import _load_module, _taskset_path
+
         pkg_map = {
             "coding": ("il_coding_tasks", "il_coding_v1", "tasks.py"),
             "reasoning": ("il_reasoning_tasks", "il_reasoning_v1", "tasks.py"),
@@ -196,9 +220,7 @@ def run_sft(
             {"role": "user", "content": ex.prompt},
             {"role": "assistant", "content": ex.response},
         ]
-        tokens = handle.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=False
-        )
+        tokens = handle.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
         train_data.append(tokens)
 
     # Optimizer — SGD is used instead of Adam because Adam's second moment
@@ -251,7 +273,7 @@ def run_sft(
                 continue
 
             input_tokens = mx.array(tokens[:-1])[None]  # [1, seq-1]
-            target_tokens = mx.array(tokens[1:])[None]   # [1, seq-1]
+            target_tokens = mx.array(tokens[1:])[None]  # [1, seq-1]
 
             def loss_fn():
                 logits = handle.model(input_tokens)
