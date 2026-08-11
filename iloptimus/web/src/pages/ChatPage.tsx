@@ -58,7 +58,9 @@ export default function ChatPage() {
     if (!installed.some((item) => item.id === modelId) && installed[0]) setModelId(installed[0].id);
   }).catch(() => setModels([])); }, []);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, thinking]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, thinking]);
 
   const send = async (text = input) => {
     const clean = text.trim();
