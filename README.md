@@ -39,6 +39,37 @@ Then open `http://127.0.0.1:7860` in your browser.
    gradable tasksets that can be selected directly in Optimus Lab
 6. **Track runs** — real-time progress bar, stage pipeline visualization, live log
    stream, and accuracy comparison (baseline → post-SFT → post-GRPO)
+7. **Use prompt skills and tools** — trusted Markdown guidance is selected from
+   the prompt, while public-web and configured MCP tools run through an audited
+   execution boundary
+
+## Local Agent Skills and Tools
+
+IL Optimus packages four prompt-only skills sourced from the official
+`anthropics/skills` and `openai/skills` repositories: frontend design,
+Playwright/browser testing, security best practices, and Jupyter notebooks.
+The router activates at most two relevant skills from explicit prompt keywords.
+Only `SKILL.md` is inserted into context; neighboring scripts are never exposed
+to or executed by the local model.
+
+Chat models can call the built-in `web_search`, `web_fetch`, `calculator`, and
+`current_time` tools using the tool-call contract supplied in their prompt.
+Public web requests reject loopback, private, link-local, multicast, reserved,
+credential-bearing, and non-standard-port URLs, and every redirect is checked
+again. Tool activity is appended to `~/.iloptimus/tool_calls.jsonl`.
+
+The official MCP Python SDK provides real stdio MCP connectivity. Reference
+`time` and `fetch` server configurations are created in
+`~/.iloptimus/mcp.json`; both are disabled by default because enabling an MCP
+server launches a local command. Set `enabled` to `true` only for a server you
+trust. The built-in safe fetch implementation is preferred for ordinary web
+access.
+
+The context control in chat is capped by both the model's declared limit and a
+KV-cache memory estimate for the detected hardware. Its TPS range combines
+model weight size, architecture/KV cost, detected memory bandwidth and backend
+efficiency. After a real response, the estimator calibrates itself against the
+measured decode rate saved in `~/.iloptimus/performance.json`.
 
 ## How No-Code Environments Work
 
@@ -85,7 +116,10 @@ All user-created data is kept outside the installed package under
 ~/.iloptimus/
 ├── models/          downloaded Hugging Face / MLX snapshots
 ├── environments/    no-code IL and RL specifications and generated tasksets
-└── runs/<run-id>/   config, event log, metrics, traces, and LoRA adapters
+├── runs/<run-id>/   config, event log, metrics, traces, and LoRA adapters
+├── mcp.json         explicit MCP server configuration (off by default)
+├── performance.json local TPS calibration samples
+└── tool_calls.jsonl append-only tool audit log
 ```
 
 Run `iloptimus data-dir` to print the active folder. Set `ILOPTIMUS_HOME` to
@@ -172,6 +206,9 @@ uv run iloptimus version            # Print version
 | GET | `/api/tasksets/{id}` | Single taskset detail |
 | POST | `/api/models/{id}/download` | Download a compatible local checkpoint |
 | GET | `/api/models/{id}/status` | Read real local/download status |
+| GET | `/api/models/{id}/context-estimate` | Hardware/model context and TPS estimate |
+| GET | `/api/skills` | Packaged read-only prompt skills |
+| GET | `/api/tools` | Built-in tools and configured MCP servers |
 | POST | `/api/chat` | Chat with a downloaded local model |
 | GET/POST | `/api/environments` | List or create no-code IL/RL environments |
 | POST | `/api/environments/from-chat` | Generate an environment with `/il` or `/rl` |

@@ -1,10 +1,10 @@
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowUp, Bot, ChevronDown, Copy, Paperclip, RotateCcw, SlidersHorizontal, User } from "lucide-react";
-import { createEnvironmentFromChat, getModels, sendChat, type ModelInfo } from "../api/client";
+import { createEnvironmentFromChat, getContextEstimate, getModels, sendChat, type ContextEstimate, type ModelInfo } from "../api/client";
 
-type Message = { role: "user" | "assistant"; text: string };
+type Message = { role: "user" | "assistant"; text: string; skills?: string[]; tools?: string[]; tps?: number };
 
 const starters = [
   "Design an IL pipeline for mathematical reasoning",
@@ -40,16 +40,26 @@ export default function ChatPage() {
   const [modelId, setModelId] = useState(savedModel?.id || "qwen2.5-1.5b");
   const [thinking, setThinking] = useState(false);
   const [commandIndex, setCommandIndex] = useState(0);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextWindow, setContextWindow] = useState(() => Number(localStorage.getItem("iloptimus-context-window")) || 4096);
+  const [contextEstimate, setContextEstimate] = useState<ContextEstimate | null>(null);
+  const [lastContextTokens, setLastContextTokens] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const model = models.find((item) => item.id === modelId)?.name || savedModel?.name || "Qwen2.5-1.5B";
+  const modelInfo = models.find((item) => item.id === modelId);
   const commandQuery = input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
   const visibleCommands = commandQuery === null ? [] : slashCommands.filter((item) => item.command.slice(1).startsWith(commandQuery));
   const commandPaletteOpen = visibleCommands.length > 0;
+  const approximateTokens = useMemo(() => Math.ceil((messages.reduce((total, message) => total + message.text.length, 0) + input.length) / 3.5), [messages, input]);
+  const usedContextTokens = Math.max(lastContextTokens, approximateTokens);
+  const contextRatio = Math.min(1, usedContextTokens / Math.max(contextWindow, 1));
+  const maxContext = Math.max(2048, Math.min(modelInfo?.context_length || 32768, contextEstimate?.max_safe_context || modelInfo?.context_length || 32768));
 
   useEffect(() => {
     const chat = params.get("chat");
     setMessages(chat ? previousChats[chat] || [] : []);
+    setLastContextTokens(0);
   }, [params]);
 
   useEffect(() => { getModels().then((items) => {
@@ -61,6 +71,18 @@ export default function ChatPage() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, thinking]);
+
+  useEffect(() => {
+    if (!modelId) return;
+    const timer = window.setTimeout(() => {
+      getContextEstimate(modelId, contextWindow).then(setContextEstimate).catch(() => setContextEstimate(null));
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [modelId, contextWindow]);
+
+  useEffect(() => {
+    if (contextWindow > maxContext) setContextWindow(maxContext);
+  }, [contextWindow, maxContext]);
 
   const send = async (text = input) => {
     const clean = text.trim();
@@ -75,8 +97,15 @@ export default function ChatPage() {
         setMessages((current) => [...current, { role: "assistant", text: `${environment.name} is ready. I created ${environment.tasks.length} gradable tasks, a ${environment.mode} reward design, and a taskset you can use in Optimus Lab. You’ll find it in My Environments.` }]);
         return;
       }
-      const response = await sendChat(modelId, clean, messages);
-      setMessages((current) => [...current, { role: "assistant", text: response.answer }]);
+      const response = await sendChat(modelId, clean, messages, contextWindow);
+      setLastContextTokens(response.context_tokens);
+      setMessages((current) => [...current, {
+        role: "assistant",
+        text: response.answer,
+        skills: response.active_skills.map((skill) => skill.name),
+        tools: response.tool_calls.map((tool) => tool.name),
+        tps: response.tokens_per_sec,
+      }]);
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message.replace(/^\{"detail":"?|"\}$/g, "") : "The local request failed";
       setMessages((current) => [...current, { role: "assistant", text: clean.startsWith("/") ? `I could not build that environment: ${detail}` : detail }]);
@@ -88,7 +117,7 @@ export default function ChatPage() {
   const runCommand = (item: typeof slashCommands[number]) => {
     if (item.kind === "prompt") { setInput(`${item.command} `); return; }
     if (item.kind === "navigate" && item.to) { navigate(item.to); return; }
-    if (item.kind === "clear") { setMessages([]); setInput(""); }
+    if (item.kind === "clear") { setMessages([]); setInput(""); setLastContextTokens(0); }
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -126,7 +155,7 @@ export default function ChatPage() {
             {messages.map((message, index) => (
               <motion.article key={`${message.role}-${index}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className={`message ${message.role}`}>
                 <div className="message-avatar">{message.role === "assistant" ? <Bot /> : <User />}</div>
-                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.role === "assistant" && <div className="message-tools"><button aria-label="Copy"><Copy /></button><button aria-label="Regenerate"><RotateCcw /></button></div>}</div>
+                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.role === "assistant" && <>{(message.skills?.length || message.tools?.length || message.tps) && <div className="agent-activity">{message.skills?.map((skill) => <span key={skill}>Skill · {skill}</span>)}{message.tools?.map((tool) => <span key={tool}>Tool · {tool}</span>)}{message.tps ? <span>{message.tps.toFixed(1)} tok/s</span> : null}</div>}<div className="message-tools"><button aria-label="Copy"><Copy /></button><button aria-label="Regenerate"><RotateCcw /></button></div></>}</div>
               </motion.article>
             ))}
             {thinking && <div className="thinking"><span /><span /><span /></div>}
@@ -138,7 +167,14 @@ export default function ChatPage() {
       <form className="composer" onSubmit={(event: FormEvent) => { event.preventDefault(); send(); }}>
         {commandPaletteOpen && <div className="command-palette" role="listbox" aria-label="Slash commands"><div className="command-palette-label">Commands</div>{visibleCommands.map((item,index)=><button type="button" key={item.command} className={index===commandIndex?"active":""} onMouseDown={(event)=>{event.preventDefault();runCommand(item);setCommandIndex(0)}}><code>{item.command}</code><span><strong>{item.title}</strong><small>{item.description}</small></span><em>↵</em></button>)}</div>}
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={onKeyDown} placeholder="Message your model…" rows={1} aria-label="Message" />
-        <div className="composer-tools"><button type="button" className="attach" aria-label="Attach file"><Paperclip /></button><span>Local context</span><div className="command-hints"><button type="button" onClick={()=>setInput("/il ")}>/il</button><button type="button" onClick={()=>setInput("/rl ")}>/rl</button></div></div>
+        {contextOpen && <div className="context-popover" role="dialog" aria-label="Context window settings">
+          <div className="tps-estimator"><span>TPS estimator</span><strong>{contextEstimate ? `~${contextEstimate.estimated_tps.toFixed(1)} tok/s` : "Calculating…"}</strong></div>
+          {contextEstimate && <p>{contextEstimate.low_tps.toFixed(1)}–{contextEstimate.high_tps.toFixed(1)} tok/s · {contextEstimate.basis}</p>}
+          <input type="range" min={2048} max={maxContext} step={1024} value={Math.min(contextWindow, maxContext)} style={{ "--slider-progress": `${Math.max(0, Math.min(100, ((contextWindow - 2048) / Math.max(1, maxContext - 2048)) * 100))}%` } as CSSProperties} onChange={(event) => { const value = Number(event.target.value); setContextWindow(value); localStorage.setItem("iloptimus-context-window", String(value)); }} aria-label="Context window size" />
+          <div className="context-scale"><span>{usedContextTokens.toLocaleString()} used</span><strong>{contextWindow.toLocaleString()} tokens</strong><span>{maxContext.toLocaleString()} max</span></div>
+          {contextEstimate && !contextEstimate.fits_in_memory && <small>This selection may use system memory and run much slower.</small>}
+        </div>}
+        <div className="composer-tools"><button type="button" className="attach" aria-label="Attach file"><Paperclip /></button><button type="button" className={`context-meter ${usedContextTokens ? "active" : ""}`} style={{ "--context-angle": `${contextRatio * 360}deg` } as CSSProperties} onClick={() => setContextOpen((open) => !open)} aria-label={`Context window: ${usedContextTokens} of ${contextWindow} tokens`} aria-expanded={contextOpen}><span /></button><span>Context {Math.round(contextRatio * 100)}%</span><div className="command-hints"><button type="button" onClick={()=>setInput("/il ")}>/il</button><button type="button" onClick={()=>setInput("/rl ")}>/rl</button></div></div>
         <button className="send-button" disabled={!input.trim() || thinking || !models.some((item) => item.id === modelId && item.local.status === "downloaded")} aria-label="Send message"><ArrowUp /></button>
       </form>
       <p className="chat-footnote">Local models can make mistakes. Verify important outputs.</p>

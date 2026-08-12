@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -51,7 +52,9 @@ from .core.model_store import (
     model_status,
     resolve_model_source,
 )
+from .core.performance import estimate_context_performance, record_chat_performance
 from .core.pipeline import _run_in_executor
+from .core.skills import list_prompt_skills, route_prompt_skills, skill_prompt
 from .core.stateful_environments import (
     StateMachineRuntime,
     is_stateful_request,
@@ -60,6 +63,7 @@ from .core.stateful_environments import (
     simulate_response,
 )
 from .core.storage import app_home, ensure_app_dirs
+from .core.tools import execute_tool, parse_tool_call, tool_definitions, tool_prompt, tools_public
 
 
 class CreateRunRequest(BaseModel):
@@ -85,6 +89,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, str]] = Field(default_factory=list)
     max_tokens: int = 384
+    context_window: int = 4096
+    use_tools: bool = True
 
 
 class DownloadModelRequest(BaseModel):
@@ -104,6 +110,26 @@ def _get_hardware():
     if _hw_cache is None:
         _hw_cache = detect_hardware()
     return _hw_cache
+
+
+def _estimated_tokens(text: str) -> int:
+    """Conservative tokenizer-independent estimate used before a model is loaded."""
+    return max(1, math.ceil(len(text) / 3.5))
+
+
+def _trim_history(history: list[dict[str, str]], budget: int) -> list[dict[str, str]]:
+    kept: list[dict[str, str]] = []
+    used = 0
+    for item in reversed(history):
+        text = str(item.get("text", ""))
+        cost = _estimated_tokens(text) + 5
+        if kept and used + cost > budget:
+            break
+        if cost > budget:
+            continue
+        kept.append({"role": str(item.get("role", "user")), "text": text})
+        used += cost
+    return list(reversed(kept))
 
 
 def create_app() -> FastAPI:
@@ -138,6 +164,14 @@ def create_app() -> FastAPI:
             "total_memory_gb": hw.total_memory_gb,
             "labels": hw.labels,
         }
+
+    @app.get("/api/skills")
+    async def skills():
+        return [skill.public() for skill in list_prompt_skills()]
+
+    @app.get("/api/tools")
+    async def tools():
+        return tools_public()
 
     @app.get("/api/models")
     async def models():
@@ -213,6 +247,13 @@ def create_app() -> FastAPI:
         precision = compatible_precision(model, hw)
         return model_status(model_id, precision, hw.recommended_backend)
 
+    @app.get("/api/models/{model_id}/context-estimate")
+    async def context_estimate(model_id: str, context_window: int = 4096):
+        model = get_model(model_id)
+        if not model:
+            raise HTTPException(404, "Model not found")
+        return estimate_context_performance(model, _get_hardware(), context_window).public()
+
     @app.post("/api/models/{model_id}/download")
     async def start_model_download(model_id: str, req: DownloadModelRequest):
         model = get_model(model_id)
@@ -240,6 +281,26 @@ def create_app() -> FastAPI:
         if not model_info:
             raise HTTPException(400, f"Unknown model: {req.model_id}")
 
+        estimate = estimate_context_performance(model_info, _get_hardware(), req.context_window)
+        selected_context = min(req.context_window, estimate.max_safe_context, model_info.context_length)
+        selected_context = max(2048, selected_context)
+        active_skills = route_prompt_skills(req.message)
+        definitions, mcp_tools = await tool_definitions() if req.use_tools else ([], {})
+        skill_guidance = skill_prompt(active_skills, max_chars=max(2_000, selected_context * 2))
+        tool_guidance = tool_prompt(definitions) if definitions else ""
+        fixed_prompt = "\n\n".join(part for part in (skill_guidance, tool_guidance) if part)
+        output_reserve = min(req.max_tokens * 2, 1024)
+        history_budget = max(
+            256,
+            selected_context - output_reserve - _estimated_tokens(fixed_prompt) - _estimated_tokens(req.message) - 64,
+        )
+        context = _trim_history(req.history, history_budget)
+        conversation = "\n".join(
+            [f"{item.get('role', 'user')}: {item.get('text', '')}" for item in context] + [f"user: {req.message}"]
+        )
+        prompt = "\n\n".join(part for part in (fixed_prompt, "Conversation:\n" + conversation) if part)
+        tool_events: list[dict[str, Any]] = []
+
         async with _chat_model_lock:
             handle = _chat_models.get(req.model_id)
             if handle is None:
@@ -257,10 +318,6 @@ def create_app() -> FastAPI:
                 _chat_models.clear()
                 _chat_models[req.model_id] = handle
 
-            context = req.history[-8:]
-            prompt = "\n".join(
-                [f"{item.get('role', 'user')}: {item.get('text', '')}" for item in context] + [f"user: {req.message}"]
-            )
             result = await _run_in_executor(
                 run_inference,
                 handle,
@@ -269,11 +326,42 @@ def create_app() -> FastAPI:
                 min(req.max_tokens, 512),
             )
 
+            for _ in range(2):
+                call = parse_tool_call(result.answer or result.text)
+                if not call:
+                    break
+                name, arguments = call
+                tool_result = await execute_tool(name, arguments, mcp_tools)
+                tool_events.append({"name": name, "ok": tool_result["ok"]})
+                prompt += (
+                    f"\n\nassistant requested tool {name}.\n"
+                    f"TOOL_RESULT: {json.dumps(tool_result, ensure_ascii=False)[:24_000]}\n"
+                    "Answer the user now using the tool result. Do not make another call unless essential."
+                )
+                result = await _run_in_executor(
+                    run_inference,
+                    handle,
+                    prompt,
+                    min(req.max_tokens, 512),
+                    min(req.max_tokens, 512),
+                )
+
+        try:
+            context_tokens = len(handle.tokenizer.encode(prompt))
+        except Exception:
+            context_tokens = _estimated_tokens(prompt)
+        record_chat_performance(req.model_id, context_tokens, result.tokens_per_sec)
+
         return {
             "answer": result.answer or result.text,
             "reasoning": result.reasoning,
             "tokens_per_sec": result.tokens_per_sec,
             "model_id": req.model_id,
+            "context_tokens": context_tokens,
+            "context_window": selected_context,
+            "context_utilization": min(1.0, context_tokens / selected_context),
+            "active_skills": [skill.public() for skill in active_skills],
+            "tool_calls": tool_events,
         }
 
     @app.get("/api/tasksets")

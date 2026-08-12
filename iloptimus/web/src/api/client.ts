@@ -56,6 +56,38 @@ export interface ModelLocalStatus {
   error: string;
 }
 
+export interface ContextEstimate {
+  context_window: number;
+  max_model_context: number;
+  max_safe_context: number;
+  estimated_tps: number;
+  low_tps: number;
+  high_tps: number;
+  kv_cache_gb: number;
+  model_memory_gb: number;
+  available_memory_gb: number;
+  fits_in_memory: boolean;
+  basis: string;
+}
+
+export interface PromptSkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  reasoning: string;
+  tokens_per_sec: number;
+  context_tokens: number;
+  context_window: number;
+  context_utilization: number;
+  active_skills: PromptSkillInfo[];
+  tool_calls: Array<{ name: string; ok: boolean }>;
+}
+
 export interface TasksetInfo {
   id: string;
   name: string;
@@ -201,11 +233,15 @@ export async function getModelStatus(modelId: string): Promise<ModelLocalStatus>
   return fetchJSON(`/api/models/${modelId}/status`);
 }
 
-export async function sendChat(modelId: string, message: string, history: Array<{ role: string; text: string }>): Promise<{ answer: string; tokens_per_sec: number }> {
+export async function getContextEstimate(modelId: string, contextWindow: number): Promise<ContextEstimate> {
+  return fetchJSON(`/api/models/${modelId}/context-estimate?context_window=${contextWindow}`);
+}
+
+export async function sendChat(modelId: string, message: string, history: Array<{ role: string; text: string }>, contextWindow: number): Promise<ChatResponse> {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model_id: modelId, message, history }),
+    body: JSON.stringify({ model_id: modelId, message, history, context_window: contextWindow, use_tools: true }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
