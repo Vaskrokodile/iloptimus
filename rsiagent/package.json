@@ -1,0 +1,23 @@
+{
+  "name": "rsi",
+  "version": "1.0.0",
+  "description": "RSI - a full terminal AI harness built on OpenTUI",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "rsi": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.5.1"
+  }
+}
