@@ -92,7 +92,11 @@ def record_chat_performance(model_id: str, context_tokens: int, tokens_per_sec: 
     values = payload.setdefault(model_id, [])
     values.append({"context_tokens": float(context_tokens), "tokens_per_sec": float(tokens_per_sec)})
     payload[model_id] = values[-20:]
-    atomic_write_json(_samples_path(), payload)
+    try:
+        atomic_write_json(_samples_path(), payload)
+    except OSError:
+        # Calibration is optional telemetry and must never make chat fail.
+        return
 
 
 def estimate_context_performance(model: ModelInfo, hw: HardwareInfo, requested_context: int) -> ContextEstimate:

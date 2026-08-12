@@ -1,7 +1,7 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowUp, Bot, ChevronDown, Copy, Paperclip, RotateCcw, SlidersHorizontal, User } from "lucide-react";
+import { ArrowUp, Bot, Check, ChevronDown, Copy, Paperclip, RotateCcw, SlidersHorizontal, User } from "lucide-react";
 import { createEnvironmentFromChat, getContextEstimate, getModels, sendChat, type ContextEstimate, type ModelInfo } from "../api/client";
 
 type Message = { role: "user" | "assistant"; text: string; skills?: string[]; tools?: string[]; tps?: number };
@@ -44,6 +44,7 @@ export default function ChatPage() {
   const [contextWindow, setContextWindow] = useState(() => Number(localStorage.getItem("iloptimus-context-window")) || 4096);
   const [contextEstimate, setContextEstimate] = useState<ContextEstimate | null>(null);
   const [lastContextTokens, setLastContextTokens] = useState(0);
+  const [copiedMessage, setCopiedMessage] = useState<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const model = models.find((item) => item.id === modelId)?.name || savedModel?.name || "Qwen2.5-1.5B";
@@ -114,6 +115,23 @@ export default function ChatPage() {
     }
   };
 
+  const copyText = async (text: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const field = document.createElement("textarea");
+      field.value = text;
+      field.style.position = "fixed";
+      field.style.opacity = "0";
+      document.body.appendChild(field);
+      field.select();
+      document.execCommand("copy");
+      field.remove();
+    }
+    setCopiedMessage(index);
+    window.setTimeout(() => setCopiedMessage((current) => current === index ? null : current), 1400);
+  };
+
   const runCommand = (item: typeof slashCommands[number]) => {
     if (item.kind === "prompt") { setInput(`${item.command} `); return; }
     if (item.kind === "navigate" && item.to) { navigate(item.to); return; }
@@ -155,7 +173,7 @@ export default function ChatPage() {
             {messages.map((message, index) => (
               <motion.article key={`${message.role}-${index}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className={`message ${message.role}`}>
                 <div className="message-avatar">{message.role === "assistant" ? <Bot /> : <User />}</div>
-                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.role === "assistant" && <>{(message.skills?.length || message.tools?.length || message.tps) && <div className="agent-activity">{message.skills?.map((skill) => <span key={skill}>Skill · {skill}</span>)}{message.tools?.map((tool) => <span key={tool}>Tool · {tool}</span>)}{message.tps ? <span>{message.tps.toFixed(1)} tok/s</span> : null}</div>}<div className="message-tools"><button aria-label="Copy"><Copy /></button><button aria-label="Regenerate"><RotateCcw /></button></div></>}</div>
+                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.role === "assistant" && <>{(message.skills?.length || message.tools?.length || message.tps) && <div className="agent-activity">{message.skills?.map((skill) => <span key={skill}>Skill · {skill}</span>)}{message.tools?.map((tool) => <span key={tool}>Tool · {tool}</span>)}{message.tps ? <span>{message.tps.toFixed(1)} tok/s</span> : null}</div>}<div className="message-tools"><button type="button" onClick={() => copyText(message.text, index)} aria-label={copiedMessage === index ? "Copied" : "Copy response"} title={copiedMessage === index ? "Copied" : "Copy response"}>{copiedMessage === index ? <Check /> : <Copy />}</button><button type="button" aria-label="Regenerate"><RotateCcw /></button></div></>}</div>
               </motion.article>
             ))}
             {thinking && <div className="thinking"><span /><span /><span /></div>}
@@ -174,7 +192,7 @@ export default function ChatPage() {
           <div className="context-scale"><span>{usedContextTokens.toLocaleString()} used</span><strong>{contextWindow.toLocaleString()} tokens</strong><span>{maxContext.toLocaleString()} max</span></div>
           {contextEstimate && !contextEstimate.fits_in_memory && <small>This selection may use system memory and run much slower.</small>}
         </div>}
-        <div className="composer-tools"><button type="button" className="attach" aria-label="Attach file"><Paperclip /></button><button type="button" className={`context-meter ${usedContextTokens ? "active" : ""}`} style={{ "--context-angle": `${contextRatio * 360}deg` } as CSSProperties} onClick={() => setContextOpen((open) => !open)} aria-label={`Context window: ${usedContextTokens} of ${contextWindow} tokens`} aria-expanded={contextOpen}><span /></button><span>Context {Math.round(contextRatio * 100)}%</span><div className="command-hints"><button type="button" onClick={()=>setInput("/il ")}>/il</button><button type="button" onClick={()=>setInput("/rl ")}>/rl</button></div></div>
+        <div className="composer-tools"><button type="button" className="attach" aria-label="Attach file"><Paperclip /></button><button type="button" className={`context-meter ${usedContextTokens ? "active" : ""}`} style={{ "--context-angle": `${contextRatio ? Math.max(12, contextRatio * 360) : 0}deg` } as CSSProperties} onClick={() => setContextOpen((open) => !open)} aria-label={`Context window: ${usedContextTokens} of ${contextWindow} tokens`} aria-expanded={contextOpen}><span /></button><span>Context {Math.round(contextRatio * 100)}%</span><div className="command-hints"><button type="button" onClick={()=>setInput("/il ")}>/il</button><button type="button" onClick={()=>setInput("/rl ")}>/rl</button></div></div>
         <button className="send-button" disabled={!input.trim() || thinking || !models.some((item) => item.id === modelId && item.local.status === "downloaded")} aria-label="Send message"><ArrowUp /></button>
       </form>
       <p className="chat-footnote">Local models can make mistakes. Verify important outputs.</p>

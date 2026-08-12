@@ -45,7 +45,12 @@
 
   * {
     font-family: "Manrope", system-ui, -apple-system, sans-serif;
+    -webkit-user-select: text;
+    user-select: text;
   }
+
+  ::selection { background: rgba(var(--accent), .34); color: rgb(var(--text-primary)); }
+  svg, input[type="range"] { -webkit-user-select: none; user-select: none; }
 
   body {
     background-color: rgb(var(--bg-base));
@@ -172,9 +177,9 @@
 .composer textarea { display: block; width: 100%; min-height: 43px; max-height: 130px; resize: none; outline: none; border: 0; background: transparent; color: rgb(var(--text-primary)); font-size: 14px; }
 .composer textarea::placeholder { color: rgb(var(--text-muted)); }
 .composer-tools { display: flex; align-items: center; gap: 7px; color: rgb(var(--text-muted)); font-size: 10px; }
-.context-meter { --context-angle: 0deg; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(var(--border-base),.13); border-radius: 50%; background: rgba(var(--border-base),.18); color: rgb(var(--text-primary)); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
+.context-meter { --context-angle: 0deg; width: 27px; height: 27px; flex: 0 0 27px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(var(--border-base),.18); border-radius: 50%; background: rgba(var(--border-base),.2); color: rgb(var(--text-primary)); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
 .context-meter.active { background: conic-gradient(currentColor var(--context-angle), rgba(var(--border-base),.18) 0); }
-.context-meter span { width: 8px; height: 8px; border-radius: 50%; background: rgb(var(--bg-elevated)); box-shadow: 0 0 0 1px rgba(var(--border-base),.05); }
+.context-meter span { width: 10px; height: 10px; border-radius: 50%; background: rgb(var(--bg-elevated)); box-shadow: 0 0 0 1px rgba(var(--border-base),.07); pointer-events: none; }
 .context-meter:hover { transform: scale(1.08); box-shadow: 0 0 0 4px rgba(var(--border-base),.045); }
 .context-popover { position: absolute; z-index: 30; left: 14px; bottom: 58px; width: min(440px, calc(100% - 28px)); padding: 18px 18px 15px; border: 1px solid rgba(var(--border-base),.14); border-radius: 16px; background: rgb(var(--bg-elevated)); color: rgb(var(--text-primary)); box-shadow: 0 20px 55px rgba(var(--glass-shadow),.24), inset 0 1px rgba(255,255,255,.045); }
 .tps-estimator { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }

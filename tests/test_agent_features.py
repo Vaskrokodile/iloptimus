@@ -3,9 +3,19 @@ import asyncio
 import pytest
 from iloptimus.core.hardware import GPUInfo, HardwareInfo
 from iloptimus.core.models import get_model
-from iloptimus.core.performance import estimate_context_performance
+from iloptimus.core.performance import estimate_context_performance, record_chat_performance
 from iloptimus.core.skills import list_prompt_skills, route_prompt_skills
-from iloptimus.core.tools import calculate, parse_tool_call, validate_public_url
+from iloptimus.core.tools import (
+    calculate,
+    ground_tool_answer,
+    looks_like_tool_call,
+    normalize_tool_call,
+    parse_tool_call,
+    suggested_tool_call,
+    tool_answer_needs_fallback,
+    tool_result_fallback,
+    validate_public_url,
+)
 from iloptimus.server import _trim_history, create_app
 
 
@@ -19,6 +29,7 @@ def test_packaged_skills_are_discoverable_and_frontend_routes_automatically():
     }
     selected = route_prompt_skills("Build a polished React frontend dashboard with responsive CSS")
     assert selected[0].id == "frontend-design"
+    assert route_prompt_skills("Find the official Model Context Protocol website") == []
 
 
 def test_security_skill_requires_security_language():
@@ -36,6 +47,54 @@ def test_tool_call_parser_and_calculator_are_constrained():
     assert calculate(call[1]["expression"]) == 8
     with pytest.raises(ValueError):
         calculate("__import__('os').getcwd()")
+
+
+def test_tool_parser_accepts_nested_fenced_small_model_format_and_repairs_query():
+    response = """```json
+{
+  "tool_name": "web_search",
+  "arguments": {},
+  "source": "built-in"
+}
+```"""
+    call = parse_tool_call(response)
+    assert call == ("web_search", {})
+    assert normalize_tool_call(call, "search the web for current MLX releases", {"web_search"}) == (
+        "web_search",
+        {"query": "search the web for current MLX releases"},
+    )
+
+
+def test_explicit_web_requests_are_planned_without_model_formatting():
+    assert suggested_tool_call("Please search online for MCP news", {"web_search", "web_fetch"}) == (
+        "web_search",
+        {"query": "Please search online for MCP news"},
+    )
+    assert suggested_tool_call("Read https://example.com/docs", {"web_search", "web_fetch"}) == (
+        "web_fetch",
+        {"url": "https://example.com/docs"},
+    )
+
+
+def test_raw_tool_requests_get_a_readable_fallback():
+    raw = '{"tool_name":"web_search","arguments":{}}'
+    assert looks_like_tool_call(raw, {"web_search"})
+    answer = tool_result_fallback(
+        "web_search",
+        {"ok": True, "result": {"results": [{"title": "Official docs", "url": "https://example.com"}]}},
+    )
+    assert "Official docs" in answer
+    assert "tool_name" not in answer
+    assert tool_answer_needs_fallback("<answer>Wrong</answer>\n</think>", {"web_search"})
+    assert tool_answer_needs_fallback("<answer>Ungrounded tool synthesis</answer>", {"web_search"})
+    grounded = ground_tool_answer(
+        "The source is https://html.duckduckgo.com/html/?q=test",
+        "web_search",
+        {"ok": True, "result": {"results": [{"title": "Official docs", "url": "https://example.com"}]}},
+        {"web_search"},
+    )
+    assert "Official docs" in grounded
+    assert "duckduckgo.com" not in grounded
 
 
 def test_public_url_validation_blocks_local_networks():
@@ -65,6 +124,14 @@ def test_context_estimate_uses_model_and_hardware_capacity(tmp_path, monkeypatch
     assert estimate.estimated_tps > 0
     assert estimate.low_tps < estimate.high_tps
     assert estimate.kv_cache_gb > 0
+
+
+def test_optional_performance_telemetry_cannot_break_chat(monkeypatch):
+    def disk_full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("iloptimus.core.performance.atomic_write_json", disk_full)
+    record_chat_performance("qwen2.5-1.5b", 2048, 22.0)
 
 
 def test_history_trimming_keeps_recent_messages():

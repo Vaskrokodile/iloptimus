@@ -37,7 +37,10 @@ def load_mcp_config() -> dict[str, Any]:
     path = config_path()
     if not path.exists():
         payload = {"servers": DEFAULT_SERVERS}
-        atomic_write_json(path, payload)
+        try:
+            atomic_write_json(path, payload)
+        except OSError:
+            pass
         return payload
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

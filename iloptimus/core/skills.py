@@ -62,6 +62,13 @@ SKILL_KEYWORDS: dict[str, set[str]] = {
     },
 }
 
+SKILL_MIN_SCORES = {
+    "frontend-design": 2,
+    "playwright": 2,
+    "security-best-practices": 1,
+    "jupyter-notebook": 1,
+}
+
 
 @dataclass(frozen=True)
 class PromptSkill:
@@ -119,7 +126,7 @@ def route_prompt_skills(prompt: str, *, limit: int = 2) -> list[PromptSkill]:
         score = sum(
             3 if " " in keyword else 1 for keyword in SKILL_KEYWORDS.get(skill.id, set()) if keyword in normalized
         )
-        if score:
+        if score >= SKILL_MIN_SCORES.get(skill.id, 1):
             scored.append((score, skill))
     scored.sort(key=lambda pair: (-pair[0], pair[1].id))
     return [skill for _, skill in scored[:limit]]
