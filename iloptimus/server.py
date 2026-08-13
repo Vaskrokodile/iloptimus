@@ -39,6 +39,16 @@ from .core import (
     get_taskset,
     run_pipeline_subprocess,
 )
+from .core.artifact_composer import (
+    ComposedGeneration,
+    assemble_threejs_artifact,
+    audit_component,
+    audit_model_authorship,
+    authorship_manifest,
+    clean_component_source,
+    component_prompt,
+    threejs_component_plan,
+)
 from .core.dataset_tools import (
     create_dataset_workspace,
     curate_dataset,
@@ -70,7 +80,9 @@ from .core.inference import (
     ModelHandle,
     load_model,
     run_completion,
+    run_function_completion,
     run_inference,
+    run_json_completion,
     run_source_completion,
     run_tool_completion,
 )
@@ -89,6 +101,14 @@ from .core.model_store import (
 from .core.performance import estimate_context_performance, record_chat_performance
 from .core.pipeline import _run_in_executor
 from .core.rsi_panels import RsiPanelManager
+from .core.scene_spec import (
+    audit_scene_authorship,
+    audit_scene_spec,
+    compile_scene_spec,
+    complete_scene_spec,
+    parse_scene_spec,
+    scene_spec_prompt,
+)
 from .core.skills import list_prompt_skills, route_prompt_skills, skill_prompt
 from .core.stateful_environments import (
     StateMachineRuntime,
@@ -132,6 +152,7 @@ from .core.tools import (
     web_search,
 )
 from .core.training_performance import (
+    load_training_profile,
     load_training_seconds_per_iteration,
     record_training_throughput,
     training_profile_key,
@@ -449,6 +470,196 @@ def create_app() -> FastAPI:
             await _run_in_executor(release_memory)
         return result
 
+    async def _generate_composed_threejs_artifact(
+        model_info,
+        precision: str,
+        source: str,
+        query: str,
+        destination: Path,
+        *,
+        guardrails: str = "",
+        adapter_path: Path | None = None,
+        session_id: str = "",
+        progress_start: float = 0.73,
+    ) -> ComposedGeneration:
+        """Generate bounded model-owned components and assemble only their interfaces."""
+        from .core.inference import release_memory
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        total_tokens = 0
+        components: dict[str, str] = {}
+        audits = {}
+        attempts: dict[str, int] = {}
+        async with _chat_model_lock:
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
+            handle = await _run_in_executor(
+                load_model,
+                model_info.huggingface_id,
+                precision,
+                adapter_path=str(adapter_path) if adapter_path else None,
+                source_override=source,
+            )
+            for index, component in enumerate(threejs_component_plan()):
+                feedback: tuple[str, ...] = ()
+                source_unit = ""
+                audit = None
+                for attempt in range(1, 4):
+                    attempts[component.id] = attempt
+                    if session_id:
+                        learning.emit(
+                            session_id,
+                            "component-generation",
+                            f"Generating {component.id} component (attempt {attempt}/3)",
+                            min(0.93, progress_start + 0.01 * index),
+                            component=component.id,
+                            attempt=attempt,
+                        )
+                    prompt = component_prompt(
+                        query,
+                        component,
+                        failure_guardrails=guardrails,
+                        verifier_feedback=feedback,
+                    )
+                    result = await _run_in_executor(
+                        run_function_completion,
+                        handle,
+                        prompt,
+                        component.function_name,
+                        component.maximum_tokens,
+                        0.0,
+                    )
+                    total_tokens += result.tokens_generated
+                    source_unit = clean_component_source(result.answer or result.text, component)
+                    audit = await asyncio.to_thread(audit_component, source_unit, component)
+                    if audit.passed:
+                        break
+                    feedback = audit.diagnostics
+                components[component.id] = source_unit
+                audits[component.id] = audit
+            del handle
+            await _run_in_executor(release_memory)
+        destination.write_text(assemble_threejs_artifact(components), encoding="utf-8")
+        manifest = authorship_manifest(
+            destination,
+            components,
+            audits,
+            model_id=model_info.id,
+            adapter_path=str(adapter_path) if adapter_path else "",
+        )
+        elapsed = time.perf_counter() - started
+        return ComposedGeneration(
+            tokens_generated=total_tokens,
+            elapsed=elapsed,
+            tokens_per_sec=total_tokens / max(elapsed, 1e-6),
+            manifest=manifest,
+            attempts=attempts,
+        )
+
+    async def _generate_scene_spec_artifact(
+        model_info,
+        precision: str,
+        source: str,
+        query: str,
+        destination: Path,
+        *,
+        adapter_path: Path | None = None,
+        session_id: str = "",
+        progress: float = 0.08,
+    ) -> ComposedGeneration:
+        """Let the local model design a scene for a trusted voxel-island runtime."""
+        from .core.inference import release_memory
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        diagnostics: tuple[str, ...] = ()
+        previous_output = ""
+        total_tokens = 0
+        attempts: dict[str, int] = {}
+        manifest: dict[str, Any] | None = None
+        async with _chat_model_lock:
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
+            handle = await _run_in_executor(
+                load_model,
+                model_info.huggingface_id,
+                precision,
+                adapter_path=str(adapter_path) if adapter_path else None,
+                source_override=source,
+            )
+            for attempt in range(1, 6):
+                attempts["scene-spec"] = attempt
+                if session_id:
+                    learning.emit(
+                        session_id,
+                        "scene-design",
+                        f"Local model is designing the executable scene (attempt {attempt}/5)",
+                        progress,
+                        attempt=attempt,
+                    )
+                result = await _run_in_executor(
+                    run_json_completion,
+                    handle,
+                    scene_spec_prompt(query, diagnostics, previous_output),
+                    650,
+                    0.0,
+                )
+                total_tokens += result.tokens_generated
+                raw_path = destination.parent / f"scene-spec-attempt-{attempt}.txt"
+                raw_path.write_text(result.answer, encoding="utf-8")
+                previous_output = result.answer
+                spec = parse_scene_spec(result.answer)
+                audit = audit_scene_spec(spec, query)
+                completed = (spec, ()) if audit.passed and spec is not None else complete_scene_spec(spec, query)
+                if completed is not None:
+                    completed_spec, default_fields = completed
+                    manifest = compile_scene_spec(completed_spec, destination, query)
+                    manifest.update(
+                        {
+                            "model_id": model_info.id,
+                            "adapter_path": str(adapter_path) if adapter_path else "",
+                            "attempts": attempt,
+                            "model_scene_spec": spec,
+                            "model_authored_fields": sorted(set(completed_spec) - set(default_fields)),
+                            "framework_default_fields": list(default_fields),
+                            "raw_output_sha256": hashlib.sha256(result.answer.encode()).hexdigest(),
+                        }
+                    )
+                    destination.with_suffix(destination.suffix + ".authorship.json").write_text(
+                        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+                    )
+                    break
+                diagnostics = audit.diagnostics
+            del handle
+            await _run_in_executor(release_memory)
+        if manifest is None:
+            raise RuntimeError("Local model failed the scene specification contract: " + "; ".join(diagnostics))
+        elapsed = time.perf_counter() - started
+        return ComposedGeneration(
+            tokens_generated=total_tokens,
+            elapsed=elapsed,
+            tokens_per_sec=total_tokens / max(elapsed, 1e-6),
+            manifest=manifest,
+            attempts=attempts,
+        )
+
+    def _enforce_model_authorship(evaluation, manifest: dict[str, Any]):
+        errors = (
+            audit_scene_authorship(manifest)
+            if manifest.get("authorship") == "local-model-scene-spec"
+            else audit_model_authorship(manifest)
+        )
+        if not errors:
+            return evaluation
+        return replace(
+            evaluation,
+            score=min(evaluation.score, 0.69),
+            passed=False,
+            hard_gates={**evaluation.hard_gates, "model_authorship": False},
+            diagnostics=[*evaluation.diagnostics, *errors],
+        )
+
     async def _collect_ttc_sources(
         session_id: str,
         queries: list[str],
@@ -661,6 +872,11 @@ def create_app() -> FastAPI:
             phase_timings: dict[str, float] = {}
             query = strip_learning_command(session.query)
             contract = derive_artifact_contract(query)
+            composed_threejs = (
+                contract.artifact_kind == "web"
+                and "three.js" in contract.requested_features
+                and bool({"voxel", "island", "sakura"} & set(contract.requested_features))
+            )
             session.task_type = "artifact"
             session.contract = contract.public()
             root = learning.root / session.id
@@ -675,9 +891,13 @@ def create_app() -> FastAPI:
             if not source:
                 raise RuntimeError("Download the selected model before running test-time adaptation")
 
-            retrieved_skills = retrieve_failure_skills(
-                artifact_kind=contract.artifact_kind,
-                features=contract.requested_features,
+            retrieved_skills = (
+                []
+                if composed_threejs
+                else retrieve_failure_skills(
+                    artifact_kind=contract.artifact_kind,
+                    features=contract.requested_features,
+                )
             )
             session.retrieved_skill_ids = [str(item["id"]) for item in retrieved_skills]
             guardrails = skill_guardrails(retrieved_skills)
@@ -690,16 +910,29 @@ def create_app() -> FastAPI:
                     skill_ids=session.retrieved_skill_ids,
                 )
             generation_prompt = artifact_generation_prompt(query, contract, skill_guardrails=guardrails)
+            if composed_threejs:
+                session.method = "framework-scene-design"
             baseline_path = root / "baseline" / contract.entrypoint
             baseline_started = time.perf_counter()
             learning.emit(session_id, "baseline-generation", "Generating the unadapted holdout artifact", 0.08)
-            baseline_result = await _generate_ttc_artifact(
-                model_info,
-                precision,
-                source,
-                generation_prompt,
-                baseline_path,
-            )
+            if composed_threejs:
+                baseline_result = await _generate_scene_spec_artifact(
+                    model_info,
+                    precision,
+                    source,
+                    query,
+                    baseline_path,
+                    session_id=session_id,
+                    progress=0.08,
+                )
+            else:
+                baseline_result = await _generate_ttc_artifact(
+                    model_info,
+                    precision,
+                    source,
+                    generation_prompt,
+                    baseline_path,
+                )
             session.baseline_artifact_path = str(baseline_path)
             learning.emit(
                 session_id,
@@ -708,16 +941,57 @@ def create_app() -> FastAPI:
                 0.16,
             )
             baseline = await asyncio.to_thread(evaluate_artifact, baseline_path, contract)
+            if composed_threejs:
+                baseline = _enforce_model_authorship(baseline, baseline_result.manifest)
             phase_timings["baseline_generation_and_verification_seconds"] = round(
                 time.perf_counter() - baseline_started, 3
             )
             session.baseline_evaluation = baseline.public()
             if baseline.passed:
-                mark_skill_use(session.retrieved_skill_ids, successful=True)
+                if not composed_threejs:
+                    mark_skill_use(session.retrieved_skill_ids, successful=True)
+                session.acceptance = {
+                    "accepted": True,
+                    "baseline_score": baseline.score,
+                    "adapted_score": baseline.score,
+                    "improvement": 0.0,
+                    "reason": (
+                        "The framework-compiled local model design passed every objective runtime gate; training was unnecessary"
+                        if composed_threejs
+                        else "Baseline passed every objective gate; training was unnecessary"
+                    ),
+                }
+                (root / "experiment.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 2,
+                            "model_id": session.model_id,
+                            "contract": contract.public(),
+                            "generation_strategy": (
+                                "local-model-scene-spec+trusted-voxel-island-runtime"
+                                if composed_threejs
+                                else "monolithic-source"
+                            ),
+                            "model_authorship": baseline_result.manifest if composed_threejs else {},
+                            "baseline_evaluation": baseline.public(),
+                            "phase_timings": phase_timings,
+                            "acceptance": session.acceptance,
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 learning.complete(
                     session_id,
-                    f"The baseline already passed every objective gate (score {baseline.score:.3f}); no weight update was justified. "
-                    f"Artifact: {baseline_path}",
+                    (
+                        f"The local model designed a scene that passed every objective gate (score {baseline.score:.3f}) "
+                        "through the trusted voxel-island Three.js runtime; no weight update or Sakura fallback was used. "
+                        if composed_threejs
+                        else f"The baseline passed every objective gate (score {baseline.score:.3f}); no weight update was justified. "
+                    )
+                    + f"Artifact: {baseline_path}",
                 )
                 return
 
@@ -846,7 +1120,7 @@ def create_app() -> FastAPI:
             failed_features = [
                 feature
                 for feature, score in baseline.feature_scores.items()
-                if score < 0.5
+                if score < 1.0
             ]
             curation = curate_dataset(
                 session.id,
@@ -854,11 +1128,11 @@ def create_app() -> FastAPI:
                 artifact_kind=contract.artifact_kind,
                 requested_features=list(contract.requested_features),
                 priority_features=failed_features,
-                assembled_examples=144,
-                expanded_examples=192,
-                chunk_chars=1_400 if contract.artifact_kind in {"web", "code"} else 2_400,
-                minimum_response_chars=1_000 if contract.artifact_kind in {"web", "code"} else 220,
-                maximum_rows=80 if hw.ram_gb <= 8 else 192,
+                assembled_examples=240 if contract.artifact_kind in {"web", "code"} else 144,
+                expanded_examples=320 if contract.artifact_kind in {"web", "code"} else 192,
+                chunk_chars=520 if contract.artifact_kind in {"web", "code"} else 2_400,
+                minimum_response_chars=280 if contract.artifact_kind in {"web", "code"} else 220,
+                maximum_rows=160 if hw.ram_gb <= 8 else 256,
             )
             assembly = curation["assembly"]
             dataset_audit = curation["filtering"]
@@ -882,9 +1156,9 @@ def create_app() -> FastAPI:
             ] + [{**row, "split": "train"} for row in filtered]
             train_count = len(filtered)
             compact_profile = hw.ram_gb <= 8 and model_info.params_b <= 2
-            expected_sequence = 256 if hw.ram_gb <= 8 else 512 if hw.ram_gb < 16 else 768
-            expected_rank = 16 if compact_profile or (model_info.params_b <= 3 and hw.ram_gb >= 16) else 8
-            expected_layers = 8 if compact_profile else 16 if model_info.params_b <= 3 and hw.ram_gb >= 16 else 8
+            expected_sequence = 192 if compact_profile else 256 if hw.ram_gb <= 8 else 512 if hw.ram_gb < 16 else 768
+            expected_rank = 8 if compact_profile else 16 if model_info.params_b <= 3 and hw.ram_gb >= 16 else 8
+            expected_layers = 4 if compact_profile else 16 if model_info.params_b <= 3 and hw.ram_gb >= 16 else 8
             throughput_key = training_profile_key(
                 model_info.id,
                 sequence_length=expected_sequence,
@@ -893,6 +1167,7 @@ def create_app() -> FastAPI:
                 backend=hw.recommended_backend,
             )
             measured_step_time = load_training_seconds_per_iteration(throughput_key)
+            measured_profile = load_training_profile(throughput_key) or {}
             decision = select_ttc_method(
                 contract=contract,
                 training_available=hw.recommended_backend == "mlx",
@@ -905,6 +1180,11 @@ def create_app() -> FastAPI:
                 backend=hw.recommended_backend,
                 paged_optimizer_available=False,
                 measured_seconds_per_iteration=measured_step_time,
+                measured_fixed_overhead_seconds=(
+                    float(measured_profile.get("fixed_overhead_seconds"))
+                    if measured_profile.get("fixed_overhead_seconds") is not None
+                    else None
+                ),
             )
             session.method = decision.method
             session.method_decision = decision.public()
@@ -991,6 +1271,7 @@ def create_app() -> FastAPI:
                 sft_grad_checkpoint=bool(training["grad_checkpoint"]),
                 sft_compile_bucket_size=int(training["compile_bucket_size"]),
                 sft_clear_cache_threshold_gb=float(training["clear_cache_threshold_gb"]),
+                sft_prefix_cache=bool(training.get("prefix_cache", False)),
                 sft_seed=int(training["seed"]),
                 sft_memory_limit_gb=min(6.0, max(3.0, hw.total_memory_gb - 0.75)),
                 grpo_iters=0,
@@ -1021,27 +1302,48 @@ def create_app() -> FastAPI:
                 if event.get("stage") == "sft-training"
                 and float(event.get("data", {}).get("iterations_per_second") or 0.0) > 0
             ]
+            adapter_path = run_dir(run.id) / "adapters" / "sft"
+            prefix_overhead = 0.0
+            try:
+                adapter_metadata = json.loads((adapter_path / "adapter_config.json").read_text(encoding="utf-8"))
+                prefix_overhead = float(adapter_metadata.get("prefix_cache", {}).get("build_seconds") or 0.0)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
             throughput_profile = record_training_throughput(
                 throughput_key,
                 training_reports,
                 run_id=run.id,
+                fixed_overhead_seconds=prefix_overhead,
             )
 
-            adapter_path = run_dir(run.id) / "adapters" / "sft"
             adapted_path = root / "adapted" / contract.entrypoint
             learning.emit(
                 session_id, "retry-generation", "Retrying the untouched original task with the trained adapter", 0.86
             )
-            await _generate_ttc_artifact(
-                model_info,
-                precision,
-                source,
-                generation_prompt,
-                adapted_path,
-                adapter_path=adapter_path,
-            )
+            if composed_threejs:
+                adapted_result = await _generate_scene_spec_artifact(
+                    model_info,
+                    precision,
+                    source,
+                    query,
+                    adapted_path,
+                    adapter_path=adapter_path,
+                    session_id=session_id,
+                    progress=0.86,
+                )
+            else:
+                adapted_result = await _generate_ttc_artifact(
+                    model_info,
+                    precision,
+                    source,
+                    generation_prompt,
+                    adapted_path,
+                    adapter_path=adapter_path,
+                )
             session.adapted_artifact_path = str(adapted_path)
             adapted = await asyncio.to_thread(evaluate_artifact, adapted_path, contract)
+            if composed_threejs:
+                adapted = _enforce_model_authorship(adapted, adapted_result.manifest)
             session.adapted_evaluation = adapted.public()
             acceptance = acceptance_decision(baseline, adapted)
             session.acceptance = acceptance
@@ -1089,6 +1391,7 @@ def create_app() -> FastAPI:
                             "max_tokens": 3072,
                             "temperature": 0.0,
                             "identical_prompt": True,
+                            "strategy": "model-authored-scene-spec" if composed_threejs else "monolithic-source",
                             "prompt_sha256": hashlib.sha256(generation_prompt.encode()).hexdigest(),
                         },
                         "search_queries": queries,
@@ -1109,6 +1412,8 @@ def create_app() -> FastAPI:
                             "baseline": hashlib.sha256(baseline_path.read_bytes()).hexdigest(),
                             "adapted": hashlib.sha256(adapted_path.read_bytes()).hexdigest(),
                         },
+                        "baseline_authorship": baseline_result.manifest if composed_threejs else {},
+                        "adapted_authorship": adapted_result.manifest if composed_threejs else {},
                         "baseline_evaluation": baseline.public(),
                         "adapted_evaluation": adapted.public(),
                         "framework_artifact_path": str(framework_path) if framework_path else "",

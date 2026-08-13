@@ -1,4 +1,5 @@
 from iloptimus.core.training_performance import (
+    load_training_profile,
     load_training_seconds_per_iteration,
     record_training_throughput,
     training_profile_key,
@@ -12,10 +13,11 @@ def test_sustained_training_profile_is_persisted_and_conservative(monkeypatch, t
         {"iterations_per_second": rate}
         for rate in (1.0, 0.8, 0.55, 0.5, 0.4, 0.35, 0.5, 0.45)
     ]
-    profile = record_training_throughput(key, reports, run_id="run-one")
+    profile = record_training_throughput(key, reports, run_id="run-one", fixed_overhead_seconds=42.5)
     assert profile is not None
     assert profile["seconds_per_iteration"] >= 2.0
     assert load_training_seconds_per_iteration(key) == profile["seconds_per_iteration"]
+    assert load_training_profile(key)["fixed_overhead_seconds"] == 42.5
 
 
 def test_training_profile_ignores_invalid_reports(monkeypatch, tmp_path):

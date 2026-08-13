@@ -10,7 +10,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -59,6 +59,11 @@ class SFTConfig:
     clear_cache_threshold_gb: float = 1.0
     compile_bucket_size: int = 128
     preserve_native_bucket_shape: bool = True
+    # Cache the frozen transformer prefix once when adapters touch only final
+    # layers. This trades a small amount of RAM for eliminating repeated base
+    # forward compute across epochs.
+    prefix_cache: bool = False
+    prefix_cache_batch_size: int = 8
     seed: int = 0
 
 
@@ -66,6 +71,64 @@ class SFTConfig:
 class SFTExample:
     prompt: str
     response: str  # the "ideal" response (from correct benchmark outputs or generated)
+
+
+class EagerCompletionDataset:
+    """Pre-tokenized rows with real lengths available to MLX's batch sorter."""
+
+    def __init__(self, rows: list[tuple[list[int], int]]) -> None:
+        self.rows = rows
+
+    def __getitem__(self, index: int) -> tuple[list[int], int]:
+        return self.rows[index]
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+
+def tokenize_sft_rows(
+    rows: list[dict[str, str]], tokenizer: Any, *, max_seq_length: int, mask_prompt: bool = True
+) -> tuple[EagerCompletionDataset, dict[str, Any]]:
+    """Tokenize once and prove how much supervised completion survives truncation."""
+    from mlx_lm.tuner.datasets import CompletionsDataset
+
+    source = CompletionsDataset(
+        rows,
+        tokenizer,
+        prompt_key="prompt",
+        completion_key="completion",
+        mask_prompt=mask_prompt,
+    )
+    tokenized: list[tuple[list[int], int]] = []
+    total_completion_tokens = 0
+    retained_completion_tokens = 0
+    fully_retained = 0
+    sequence_lengths: list[int] = []
+    for row in rows:
+        tokens, offset = source.process(row)
+        tokens = list(tokens)
+        offset = int(offset)
+        completion_tokens = max(0, len(tokens) - offset)
+        retained_tokens = max(0, min(len(tokens), max_seq_length) - min(offset, max_seq_length))
+        total_completion_tokens += completion_tokens
+        retained_completion_tokens += retained_tokens
+        fully_retained += int(len(tokens) <= max_seq_length)
+        sequence_lengths.append(len(tokens))
+        tokenized.append((tokens, offset))
+    ordered = sorted(sequence_lengths)
+    p95_index = min(len(ordered) - 1, max(0, int(0.95 * len(ordered)))) if ordered else 0
+    stats = {
+        "rows": len(rows),
+        "fully_retained_rows": fully_retained,
+        "fully_retained_fraction": round(fully_retained / max(1, len(rows)), 4),
+        "completion_retention": round(retained_completion_tokens / max(1, total_completion_tokens), 4),
+        "completion_tokens": total_completion_tokens,
+        "retained_completion_tokens": retained_completion_tokens,
+        "mean_sequence_tokens": round(sum(sequence_lengths) / max(1, len(sequence_lengths)), 2),
+        "p95_sequence_tokens": ordered[p95_index] if ordered else 0,
+        "maximum_sequence_tokens": max(sequence_lengths, default=0),
+    }
+    return EagerCompletionDataset(tokenized), stats
 
 
 def generate_sft_data(
@@ -102,10 +165,9 @@ def generate_sft_data(
                 if not ideal_response:
                     continue
                 if environment.get("domain") == "artifact-building":
-                    prompt = (
-                        str(task["prompt"]).strip()
-                        + " Return source code only; do not use reasoning tags, answer tags, or explanatory prose."
-                    )
+                    prompt = str(task["prompt"]).strip()
+                    if "code only" not in prompt.casefold():
+                        prompt += " Return source code only; do not use reasoning tags or explanatory prose."
                 else:
                     prompt = build_prompt(domain, i)
                 examples.append(SFTExample(prompt=prompt, response=ideal_response))
@@ -216,10 +278,11 @@ def run_sft(
     Returns the path to the saved adapter.
     """
     import mlx.core as mx
+    import mlx.nn as nn
     import mlx.optimizers as opt
+    from mlx_lm.models.base import create_attention_mask
     from mlx_lm.tuner.callbacks import TrainingCallback
-    from mlx_lm.tuner.datasets import CacheDataset, CompletionsDataset
-    from mlx_lm.tuner.trainer import TrainingArgs, iterate_batches, train
+    from mlx_lm.tuner.trainer import TrainingArgs, default_loss, iterate_batches, train
 
     config = config or SFTConfig()
 
@@ -267,14 +330,11 @@ def run_sft(
     )
 
     rows = [{"prompt": example.prompt, "completion": example.response} for example in examples]
-    train_data = CacheDataset(
-        CompletionsDataset(
-            rows,
-            handle.tokenizer,
-            prompt_key="prompt",
-            completion_key="completion",
-            mask_prompt=config.mask_prompt,
-        )
+    train_data, data_stats = tokenize_sft_rows(
+        rows,
+        handle.tokenizer,
+        max_seq_length=config.max_seq_length,
+        mask_prompt=config.mask_prompt,
     )
     optimizer_name = config.optimizer.casefold()
     if optimizer_name == "sgd":
@@ -331,6 +391,10 @@ def run_sft(
         clear_cache_threshold=int(config.clear_cache_threshold_gb * 1024**3),
     )
 
+    prefix_cache_stats: dict[str, Any] = {"enabled": False}
+    training_model = handle.model
+    training_loss = default_loss
+
     def bucketed_batches(*args, **kwargs):
         """Use bounded stable shapes so MLX reuses compiled training graphs.
 
@@ -354,14 +418,100 @@ def run_sft(
                 batch = mx.pad(batch, ((0, 0), (0, target - current)))
             yield batch, lengths
 
+    training_batches = bucketed_batches
+    if config.prefix_cache and config.batch_size == 1 and num_layers < len(handle.model.model.layers):
+        prefix_started = time.perf_counter()
+        split = len(handle.model.model.layers) - num_layers
+        cached_rows: list[tuple[Any, list[int], int]] = []
+        prepared_rows = []
+        for index in range(len(train_data)):
+            tokens, offset = train_data[index]
+            tokens = list(tokens[: config.max_seq_length])
+            if len(tokens) >= 2:
+                prepared_rows.append((tokens, min(int(offset), len(tokens))))
+        prepared_rows.sort(key=lambda item: len(item[0]))
+        cache_batch_size = max(1, config.prefix_cache_batch_size)
+        for start in range(0, len(prepared_rows), cache_batch_size):
+            group = prepared_rows[start : start + cache_batch_size]
+            maximum = max(len(tokens) - 1 for tokens, _ in group)
+            token_batch = np.zeros((len(group), maximum), dtype=np.int32)
+            for row_index, (tokens, _) in enumerate(group):
+                token_batch[row_index, : len(tokens) - 1] = tokens[:-1]
+            hidden = handle.model.model.embed_tokens(mx.array(token_batch))
+            mask = create_attention_mask(hidden)
+            for layer in handle.model.model.layers[:split]:
+                hidden = layer(hidden, mask, None)
+            mx.eval(hidden)
+            for row_index, (tokens, offset) in enumerate(group):
+                row_hidden = mx.array(hidden[row_index, : len(tokens) - 1, :])
+                mx.eval(row_hidden)
+                cached_rows.append((row_hidden, tokens, offset))
+
+        class CachedSuffixModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = handle.model.model.layers[split:]
+                self.norm = handle.model.model.norm
+                self.lm_head = handle.model.lm_head
+
+            def __call__(self, hidden):
+                mask = create_attention_mask(hidden)
+                for layer in self.layers:
+                    hidden = layer(hidden, mask, None)
+                return self.lm_head(self.norm(hidden))
+
+        training_model = CachedSuffixModel()
+
+        def cached_loss(model, hidden, tokens, lengths):
+            targets = tokens[:, 1:]
+            logits = model(hidden)
+            steps = mx.arange(1, targets.shape[1] + 1)
+            mask = mx.logical_and(steps >= lengths[:, 0:1], steps <= lengths[:, 1:])
+            cross_entropy = nn.losses.cross_entropy(logits, targets) * mask
+            token_count = mask.sum()
+            loss = cross_entropy.astype(mx.float32).sum() / token_count
+            return loss, token_count
+
+        def cached_batches(*, loop=False, seed=None, **_kwargs):
+            if seed is not None:
+                np.random.seed(seed)
+            order = list(range(len(cached_rows)))
+            while True:
+                for index in np.random.permutation(order):
+                    hidden, tokens, offset = cached_rows[int(index)]
+                    yield (
+                        hidden[None, :, :],
+                        mx.array([tokens]),
+                        mx.array([[offset, len(tokens)]]),
+                    )
+                if not loop:
+                    break
+
+        training_batches = cached_batches
+        training_loss = cached_loss
+        cache_bytes = sum(int(hidden.nbytes) for hidden, _, _ in cached_rows)
+        prefix_cache_stats = {
+            "enabled": True,
+            "prefix_layers": split,
+            "trainable_suffix_layers": num_layers,
+            "rows": len(cached_rows),
+            "batch_size": cache_batch_size,
+            "bytes": cache_bytes,
+            "build_seconds": round(time.perf_counter() - prefix_started, 3),
+        }
+
     train(
-        handle.model,
+        training_model,
         optimizer,
         train_data,
         args=args,
-        iterate_batches=bucketed_batches,
+        loss=training_loss,
+        iterate_batches=training_batches,
         training_callback=MetricsCallback(),
     )
+    # Prefix-cached training uses a suffix wrapper, but adapters must retain
+    # their original full-model parameter paths for normal inference loading.
+    mx.save_safetensors(adapter_file, dict(tree_flatten(handle.model.trainable_parameters())))
 
     cfg = {
         "adapter_path": os.path.basename(adapter_path),
@@ -381,8 +531,10 @@ def run_sft(
         "compile_bucket_size": config.compile_bucket_size,
         "clear_cache_threshold_gb": config.clear_cache_threshold_gb,
         "preserve_native_bucket_shape": config.preserve_native_bucket_shape,
+        "prefix_cache": prefix_cache_stats,
         "trainable_parameters": trainable_parameters,
         "seed": config.seed,
+        "training_data": data_stats,
         "mean_iterations_per_second": round(
             sum(item[0] for item in throughput_reports) / max(1, len(throughput_reports)), 4
         ),

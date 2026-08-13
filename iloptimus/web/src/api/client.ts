@@ -105,7 +105,9 @@ export interface LearningSession {
   environment_id: string;
   run_id: string;
   baseline_artifact_path: string;
+  baseline_evaluation: { passed?: boolean; score?: number };
   adapted_artifact_path: string;
+  adapted_evaluation: { passed?: boolean; score?: number };
   accepted_adapter_path: string;
   retrieved_skill_ids: string[];
   generated_skill_path: string;

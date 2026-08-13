@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--compile-bucket", type=int, default=128)
     parser.add_argument("--cache-threshold-gb", type=float, default=1.0)
     parser.add_argument("--legacy-bucket-rounding", action="store_true")
+    parser.add_argument("--prefix-cache", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--lora-scale", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -86,6 +87,7 @@ def main() -> None:
                 compile_bucket_size=arguments.compile_bucket,
                 clear_cache_threshold_gb=arguments.cache_threshold_gb,
                 preserve_native_bucket_shape=not arguments.legacy_bucket_rounding,
+                prefix_cache=arguments.prefix_cache,
                 optimizer="adamw",
                 mask_prompt=True,
                 seed=arguments.seed,
@@ -114,6 +116,7 @@ def main() -> None:
                 "compile_bucket": arguments.compile_bucket,
                 "cache_threshold_gb": arguments.cache_threshold_gb,
                 "preserve_native_bucket_shape": not arguments.legacy_bucket_rounding,
+                "prefix_cache": adapter_config.get("prefix_cache", {}),
                 "learning_rate": arguments.learning_rate,
                 "lora_scale": arguments.lora_scale,
                 "seed": arguments.seed,

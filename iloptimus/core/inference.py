@@ -316,6 +316,137 @@ def run_source_completion(
     )
 
 
+def run_function_completion(
+    handle: ModelHandle,
+    prompt: str,
+    function_name: str,
+    max_tokens: int = 768,
+    temperature: float = 0.0,
+) -> InferenceResult:
+    """Stream one JavaScript function and stop at its balanced closing brace.
+
+    Component contracts make a separate reasoning rollout wasteful. DeepSeek's
+    reasoning section is closed immediately, and deterministic generation ends
+    as soon as the requested function is structurally complete.
+    """
+    import mlx.core as mx
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+    from .artifact_composer import balanced_function_end
+
+    focused_prompt = (
+        prompt
+        + f"\n\nOutput JavaScript only. Begin with: function {function_name}(world) {{"
+    )
+    chat_text = handle.tokenizer.apply_chat_template(
+        [{"role": "user", "content": focused_prompt}], tokenize=False, add_generation_prompt=True
+    )
+    prefix = f"function {function_name}(world) {{"
+    if "deepseek-r1" in handle.huggingface_id.lower():
+        generation_prompt = chat_text + THINK_CLOSE + "\n```javascript\n" + prefix
+    else:
+        generation_prompt = chat_text + "```javascript\n" + prefix
+    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    processors = make_logits_processors(repetition_penalty=1.08, repetition_context_size=192)
+    stream = stream_generate(
+        handle.model,
+        handle.tokenizer,
+        prompt=generation_prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+        logits_processors=processors,
+    )
+    started = time.time()
+    source = prefix
+    generated_tokens = 0
+    try:
+        for response in stream:
+            source += response.text
+            generated_tokens = int(response.generation_tokens)
+            bounds = balanced_function_end(source, function_name)
+            if bounds:
+                source = source[bounds[0] : bounds[1]]
+                break
+    finally:
+        stream.close()
+    elapsed = time.time() - started
+    mx.clear_cache()
+    return InferenceResult(
+        text=source.strip(),
+        reasoning="",
+        answer=source.strip(),
+        elapsed=elapsed,
+        tokens_generated=generated_tokens,
+        tokens_per_sec=generated_tokens / max(elapsed, 1e-6),
+    )
+
+
+def run_json_completion(
+    handle: ModelHandle,
+    prompt: str,
+    max_tokens: int = 768,
+    temperature: float = 0.0,
+) -> InferenceResult:
+    """Generate one JSON object without spending tokens on a reasoning pass."""
+    import mlx.core as mx
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+    chat_text = handle.tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt + "\nReturn one JSON object only."}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    generation_prompt = chat_text + (THINK_CLOSE + "\n" if "deepseek-r1" in handle.huggingface_id.lower() else "") + "{"
+    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=192)
+    stream = stream_generate(
+        handle.model,
+        handle.tokenizer,
+        prompt=generation_prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+        logits_processors=processors,
+    )
+    started = time.time()
+    text = "{"
+    generated_tokens = 0
+    depth = 1
+    quote = False
+    escaped = False
+    try:
+        for response in stream:
+            text += response.text
+            generated_tokens = int(response.generation_tokens)
+            for char in response.text:
+                if escaped:
+                    escaped = False
+                elif char == "\\" and quote:
+                    escaped = True
+                elif char == '"':
+                    quote = not quote
+                elif not quote and char == "{":
+                    depth += 1
+                elif not quote and char == "}":
+                    depth -= 1
+            if depth <= 0:
+                text = text[: text.rfind("}") + 1]
+                break
+    finally:
+        stream.close()
+    elapsed = time.time() - started
+    mx.clear_cache()
+    return InferenceResult(
+        text=text.strip(),
+        reasoning="",
+        answer=text.strip(),
+        elapsed=elapsed,
+        tokens_generated=generated_tokens,
+        tokens_per_sec=generated_tokens / max(elapsed, 1e-6),
+    )
+
+
 def _local_model_path(hf_id: str, precision: str, cache_dir: str) -> Path:
     """Get the local path where a converted model should be stored."""
     safe_name = hf_id.replace("/", "_")

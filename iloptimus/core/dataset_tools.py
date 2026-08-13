@@ -211,8 +211,8 @@ def assemble_dataset(
             rows.append(
                 {
                     "prompt": (
-                        f"Implement a reusable {artifact_kind} pattern focused on {focus}. "
-                        "Return complete, syntactically valid source and preserve the verified APIs."
+                        f"Write a complete {artifact_kind} source unit for {focus}. "
+                        "Return syntactically valid code only."
                     ),
                     "ideal_response": excerpt,
                     "expected_answer": excerpt[:1_200],
@@ -266,8 +266,8 @@ def expand_dataset(workspace_id: str, *, target_examples: int = 192) -> dict[str
                 {
                     **row,
                     "prompt": (
-                        f"Implement focused source unit {span_index + 1} using {features}. "
-                        "Return only the complete source unit with the verified API usage."
+                        f"Write source unit {span_index + 1} for {features}. "
+                        "Return valid code only."
                     ),
                     "ideal_response": response,
                     "expected_answer": response[:1_200],

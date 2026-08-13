@@ -9,6 +9,10 @@ Use this workflow for difficult requests that must produce runnable code or a
 rendered artifact.
 
 1. Convert the request into observable requirements before generating code.
+   When a trusted engine/tool contract exists, prefer having a small model
+   author a constrained design specification over asking it to rewrite the
+   engine. Validate the specification, preserve raw output and hashes, and
+   label trusted runtime code separately from model-authored design data.
 2. Preserve the exact user request as a holdout. Do not put it into training
    examples or rewrite it differently for the adapted retry.
 3. Write a persistent subtask ledger. Give every capability its own objective,
@@ -42,9 +46,10 @@ rendered artifact.
    independent repository origins for every requested capability. Stop instead
    of training when that dataset-level audit fails.
 10. Keep the exact task out of the training split. Build demonstrations from
-   complete reusable multi-kilobyte implementation units, not arbitrary tiny
-   text slices. Filter short source completions before training so their EOS
-   boundaries do not teach large artifact requests to stop prematurely.
+   complete syntax-bounded implementation units, not arbitrary text slices.
+   Measure supervised completion-token retention at the configured sequence
+   cap. Split or reject rows until nearly all answer tokens reach the loss;
+   source byte count alone is not evidence of useful training.
 11. Prefer retrieval when evidence is sparse. Use QLoRA-IL for grounded
    demonstrations when local quantized training is available. Use RL only when
    an executable multi-step rollout and stable reward are implemented.
@@ -53,6 +58,10 @@ rendered artifact.
 12. Select iterations, rank, adapted layers, sequence length, batch size,
    accumulation, checkpointing, and optimizer from model size, memory, dataset
    size, and a time budget. Require multiple passes over the curated data.
+   When adapters touch only final MLX layers, benchmark caching the frozen
+   transformer prefix once. Budget cache construction as fixed overhead and
+   suffix updates separately; never report suffix updates/second as total-run
+   throughput.
 13. Retry with the exact same prompt, decoding budget, and temperature used for
    the baseline. Execute the same independent verifier.
 14. Accept an adapter only if every hard gate passes and held-out quality clears
@@ -62,6 +71,14 @@ rendered artifact.
    storage. Count a retrieved skill as successful only when a later model
    artifact passes; a trusted framework fallback does not promote the skill or
    prove model competence.
+16. A framework-backed result counts as a model success only when the local
+   model authored the task-specific title, palette, geometry, placements, and
+   details; the runtime is named in provenance; `fallback_used` is false; and
+   the compiled artifact passes the complete runtime verifier. A compiler may
+   normalize bounded coordinates or supply a generic engine default for one
+   invalid motion field, but it must record both contributions and preserve the
+   raw model candidate. Never describe runtime bytes as model-written source
+   bytes.
 
 After every subtask, emit an audit record before starting the next one. A task
 is complete only when its mechanical audit passes; a confident summary is not

@@ -252,3 +252,65 @@ consumed the prior matching failure skill. Partial feature scores now become
 completion rules too, and repeated observations for the same repair signature
 are retained in `evidence.json` rather than overwriting history. Failed uses do
 not increase the skill's success count.
+
+## Framework-backed model scene success
+
+The monolithic source experiment established that asking a 1.5B model for one
+flawless 12–15 KB application was the wrong interface. Its completion repeated
+blocks, hallucinated APIs, and frequently ended before closing the JavaScript
+module. Splitting the same request into a world-initializer component removed
+truncation but still produced nonexistent Three.js APIs; the component verifier
+caught that failure.
+
+The production path now treats Three.js as an engine rather than something the
+model must rewrite. The local model emits a bounded scene specification covering
+title, palette, terrain dimensions, water, particle count, camera, distinct
+tree placements, scene details, and motion. A trusted voxel-island runtime compiles that
+design into instanced voxel terrain, shader water, blossom trees, falling
+petals, camera movement, OrbitControls, and responsive rendering. The raw model
+output, normalized specification, runtime identity, hashes, retry count, and a
+`fallback_used` flag are persisted beside the artifact. A hand-authored Sakura
+fallback cannot satisfy the model-authorship gate.
+
+Exact final session `60b839f03698` used the unadapted local
+DeepSeek-R1-Distill-Qwen-1.5B. The typed contract contained no populated example.
+The first two candidates failed mechanically; on attempt three the model authored
+`Sakura's Sakura Island`, five original palette colors, radius 18 and height 10
+terrain, 150-unit water, 600 petals, a camera direction, three distinct tree
+placements, and Sakura-specific details. Its motion value had the wrong shape,
+so the compiler supplied only its generic motion default and recorded that fact;
+it also scaled the oversized camera and tree coordinates while preserving their
+relative layout. The resulting 16,597-byte artifact scored 0.9439 in 37.811
+seconds end to end and passed source depth, JavaScript syntax, every requested
+capability, and a real nonblank Chromium render. Its authorship manifest records
+`local-model-scene-spec`, `trusted-voxel-island-threejs-engine`,
+`framework_default_fields: ["motion"]`, normalized coordinate fields, and
+`fallback_used: false`. Because the unadapted design already passed, the harness
+correctly skipped training.
+
+This result means the model designed the scene through a constrained tool and
+the trusted engine rendered it. It does not mean the model independently wrote
+all 14 KB of engine code. That is the same separation used by a human designer
+working in a game engine, and it is deliberately reported rather than hidden.
+
+## Token-efficient data and frozen-prefix training
+
+The prior 79-example Sakura corpus had a hidden efficiency failure: every
+completion exceeded the 256-token cap, zero examples were retained end-to-end,
+and only 61.6% of supervised completion tokens reached the loss. The revised
+curator creates complete syntax-bounded units of 300–585 characters and shorter
+prompts. It retained 111 examples across 46 files and nine origins, passed all
+eight capability audits, kept zero holdout contamination, and retained 99.64%
+of 14,099 supervised completion tokens at a 192-token sequence cap. Curation
+took 0.859 seconds without model inference.
+
+The compact MLX path also supports frozen-prefix caching. With LoRA on the final
+four Q/V layers, the lower 24 transformer layers are evaluated once per source
+unit and cached. On the real 111-row corpus, suffix training measured 0.5872
+updates/s and 70.301 useful tokens/s at 1.817 GB peak, compared with roughly
+0.2647 updates/s and 30.372 tokens/s for the uncached four-layer path. The cache
+build took 228.879 seconds, so the scheduler records it as fixed overhead; it is
+beneficial only when enough epochs amortize that cost. An independent eight-row
+reload check trained at 78–91 tokens/s after the cache build, saved 155,648
+adapter parameters under their normal full-model names, and reloaded them into
+the base model successfully.

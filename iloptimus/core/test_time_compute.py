@@ -442,6 +442,7 @@ def select_method(
     backend: str = "mlx",
     paged_optimizer_available: bool = False,
     measured_seconds_per_iteration: float | None = None,
+    measured_fixed_overhead_seconds: float | None = None,
 ) -> MethodDecision:
     reasons: list[str] = []
     verifier = contract.task_type == "artifact"
@@ -480,27 +481,36 @@ def select_method(
     # after gradient accumulation. Count both explicitly so the stated epoch
     # coverage is real and not accidentally divided by accumulation.
     requested_microbatches = math.ceil(train_examples * target_epochs / batch_size)
-    iteration_cap = 320 if compact_mlx_profile else 300 if memory_gb >= 16 else 240
+    iteration_cap = 640 if compact_mlx_profile else 300 if memory_gb >= 16 else 240
     iterations = min(iteration_cap, max(64, requested_microbatches))
     if maximum_training_seconds <= 180:
         iterations = min(iterations, 64)
-    # The measured long run completed 234 updates plus load/benchmarks in
-    # 453.8 seconds. Keep headroom for thermal variance while spending the
-    # recovered budget on a fourth data pass rather than idle orchestration.
-    default_seconds_per_iteration = 1.85 if compact_mlx_profile else 2.0
+    # Compact source units avoid the old all-rows-at-256 truncation regime.
+    # Until a machine-specific seq192 profile exists, size the first run from
+    # the controlled native-shape benchmark and replace this immediately with
+    # sustained telemetry from the completed run.
+    default_seconds_per_iteration = 1.8 if compact_mlx_profile else 2.0
     seconds_per_iteration = max(
         default_seconds_per_iteration,
         float(measured_seconds_per_iteration or 0.0),
     )
-    runtime_overhead_seconds = 25
+    # Frozen-prefix caching has a measured one-time cost, followed by much
+    # faster suffix-only updates. Budget both explicitly on the first run.
+    prefix_cache = compact_mlx_profile and backend == "mlx" and batch_size == 1
+    prefix_overhead = (
+        float(measured_fixed_overhead_seconds)
+        if measured_fixed_overhead_seconds is not None
+        else 230.0 if prefix_cache else 0.0
+    )
+    runtime_overhead_seconds = 25 + prefix_overhead
     budget_iteration_cap = max(
         32,
         math.floor((maximum_training_seconds - runtime_overhead_seconds) / seconds_per_iteration),
     )
     iterations = min(iterations, budget_iteration_cap)
-    rank = 16 if compact_mlx_profile or (model_params_b <= 3 and memory_gb >= 16) else 8
-    layers = 8 if compact_mlx_profile else 16 if model_params_b <= 3 and memory_gb >= 16 else 8
-    sequence = 256 if compact_mlx_profile else 256 if memory_gb <= 8 else 512 if memory_gb < 16 else 768
+    rank = 8 if prefix_cache else 16 if compact_mlx_profile or (model_params_b <= 3 and memory_gb >= 16) else 8
+    layers = 4 if prefix_cache else 8 if compact_mlx_profile else 16 if model_params_b <= 3 and memory_gb >= 16 else 8
+    sequence = 192 if compact_mlx_profile else 256 if memory_gb <= 8 else 512 if memory_gb < 16 else 768
     training = {
         "iterations": iterations,
         "optimizer_updates": math.ceil(iterations / grad_accumulation),
@@ -514,10 +524,15 @@ def select_method(
         "lora_rank": rank,
         "lora_layers": layers,
         "lora_scale": 20.0,
-        "lora_targets": ["self_attn.q_proj", "self_attn.v_proj", "self_attn.o_proj"],
+        "lora_targets": (
+            ["self_attn.q_proj", "self_attn.v_proj"]
+            if prefix_cache
+            else ["self_attn.q_proj", "self_attn.v_proj", "self_attn.o_proj"]
+        ),
         "max_seq_length": sequence,
         "compile_bucket_size": 32 if compact_mlx_profile else 128,
         "clear_cache_threshold_gb": 1.0 if memory_gb <= 8 else 2.0,
+        "prefix_cache": prefix_cache,
         "mask_prompt": True,
         "seed": 0,
         "grad_checkpoint": memory_gb < model_params_b * 1.3 + 2.0,
@@ -527,6 +542,7 @@ def select_method(
         "estimated_training_seconds": round(iterations * seconds_per_iteration + runtime_overhead_seconds),
         "seconds_per_iteration": round(seconds_per_iteration, 4),
         "throughput_source": "measured-local-profile" if measured_seconds_per_iteration else "hardware-default",
+        "fixed_overhead_seconds": round(prefix_overhead, 3),
     }
     return MethodDecision(method, tuple(reasons), verifier, training_available, training)
 

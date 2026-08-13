@@ -77,6 +77,7 @@ class RunConfig:
     sft_memory_limit_gb: float = 3.0
     sft_compile_bucket_size: int = 128
     sft_clear_cache_threshold_gb: float = 1.0
+    sft_prefix_cache: bool = False
     sft_seed: int = 0
     grpo_iters: int = 10  # reduced from 50 — research shows diminishing returns after 10-20 iters
     grpo_group_size: int = 2  # reduced from 4 — 2-GRPO matches 16-GRPO per recent research
@@ -534,6 +535,7 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         grad_checkpoint=config.sft_grad_checkpoint,
         compile_bucket_size=config.sft_compile_bucket_size,
         clear_cache_threshold_gb=config.sft_clear_cache_threshold_gb,
+        prefix_cache=config.sft_prefix_cache,
         seed=config.sft_seed,
         steps_per_eval=max(1, min(10, config.sft_iters)),
     )

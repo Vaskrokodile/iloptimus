@@ -22,12 +22,18 @@ def training_profile_key(
 
 
 def load_training_seconds_per_iteration(profile_key: str) -> float | None:
+    profile = load_training_profile(profile_key)
+    return float(profile["seconds_per_iteration"]) if profile else None
+
+
+def load_training_profile(profile_key: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(_path().read_text(encoding="utf-8"))
-        value = float(payload.get("profiles", {}).get(profile_key, {}).get("seconds_per_iteration"))
+        profile = dict(payload.get("profiles", {}).get(profile_key, {}))
+        value = float(profile.get("seconds_per_iteration"))
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    return value if math.isfinite(value) and value > 0 else None
+    return profile if math.isfinite(value) and value > 0 else None
 
 
 def record_training_throughput(
@@ -35,6 +41,7 @@ def record_training_throughput(
     reports: Iterable[dict[str, Any]],
     *,
     run_id: str,
+    fixed_overhead_seconds: float = 0.0,
 ) -> dict[str, Any] | None:
     """Record a conservative sustained rate, ignoring warm-up and invalid samples."""
     rates = [
@@ -66,6 +73,7 @@ def record_training_throughput(
         "median_seconds_per_iteration": round(statistics.median(seconds), 4),
         "samples": samples + len(rates),
         "run_id": run_id,
+        "fixed_overhead_seconds": round(max(0.0, fixed_overhead_seconds), 3),
     }
     payload["profiles"][profile_key] = profile
     atomic_write_json(path, payload)

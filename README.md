@@ -55,6 +55,11 @@ Then open `http://127.0.0.1:7860` in your browser.
 9. **Remember verified failures** — objective artifact failures become compact,
    validated repair skills. Matching future tasks retrieve them, while only a
    later passing model artifact can promote their success count.
+10. **Build framework-backed model scenes** — small local models design a
+    constrained, hash-audited scene specification while a trusted voxel-island
+    Three.js runtime supplies rendering primitives. Invalid specifications receive
+    mechanical feedback and retry; no Sakura fallback can count as a model
+    success.
 
 ## Local Agent Skills and Tools
 
@@ -83,6 +88,16 @@ KV-cache memory estimate for the detected hardware. Its TPS range combines
 model weight size, architecture/KV cost, detected memory bandwidth and backend
 efficiency. After a real response, the estimator calibrates itself against the
 measured decode rate saved in `~/.iloptimus/performance.json`.
+
+Artifact training data is compiled into complete syntax-bounded source units.
+The curator records supervised-token retention before training. On the current
+Sakura corpus this increased retained answer tokens from 61.6% to 99.64% while
+expanding the accepted set from 79 to 111 independently sourced units.
+
+For compact MLX adapters, IL Optimus can cache the frozen transformer prefix
+once and train only the final LoRA-enabled suffix. The one-time cache build and
+sustained suffix step rate are budgeted separately and persisted; the planner
+does not hide cache construction behind the reported updates/second.
 
 ## How No-Code Environments Work
 

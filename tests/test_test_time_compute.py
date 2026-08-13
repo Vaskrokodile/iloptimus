@@ -204,18 +204,20 @@ def test_method_and_adapter_acceptance_require_evidence_and_improvement():
     )
     assert qlora.method == "qlora-il"
     assert qlora.training["iterations"] >= 48
-    assert qlora.training["lora_rank"] == 16
-    assert qlora.training["lora_layers"] == 8
+    assert qlora.training["lora_rank"] == 8
+    assert qlora.training["lora_layers"] == 4
     assert qlora.training["lora_scale"] == 20.0
-    assert qlora.training["max_seq_length"] == 256
+    assert qlora.training["max_seq_length"] == 192
     assert qlora.training["compile_bucket_size"] == 32
     assert qlora.training["clear_cache_threshold_gb"] == 1.0
     assert qlora.training["estimated_training_seconds"] <= 600
     assert qlora.training["mask_prompt"] is True
     assert qlora.training["seed"] == 0
     assert qlora.training["optimizer_memory_strategy"] == "unified-memory"
+    assert qlora.training["prefix_cache"] is True
     assert qlora.training["target_epochs"] == 4
-    assert qlora.training["iterations"] > 234
+    assert qlora.training["iterations"] >= 180
+    assert qlora.training["fixed_overhead_seconds"] == 230.0
 
     pqlora = select_method(
         contract=contract,
