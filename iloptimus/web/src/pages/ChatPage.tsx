@@ -1,10 +1,11 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowUp, Bot, Check, ChevronDown, Copy, Paperclip, RotateCcw, SlidersHorizontal, User } from "lucide-react";
-import { createEnvironmentFromChat, getContextEstimate, getModels, sendChat, type ContextEstimate, type ModelInfo } from "../api/client";
+import { ArrowUp, Bot, BrainCircuit, Check, ChevronDown, Copy, Database, ExternalLink, Globe2, Paperclip, RotateCcw, SlidersHorizontal, User } from "lucide-react";
+import { createEnvironmentFromChat, createRsiPanels, getContextEstimate, getLearningSession, getModels, sendChat, streamLearningEvents, type ContextEstimate, type LearningSession, type ModelInfo } from "../api/client";
+import { refreshWorkspaceTabs } from "../components/WorkspaceTabs";
 
-type Message = { role: "user" | "assistant"; text: string; skills?: string[]; tools?: string[]; tps?: number };
+type Message = { role: "user" | "assistant"; text: string; skills?: string[]; tools?: string[]; tps?: number; panelIds?: string[]; learningId?: string };
 
 const starters = [
   "Design an IL pipeline for mathematical reasoning",
@@ -26,6 +27,8 @@ const previousChats: Record<string, Message[]> = {
 const slashCommands = [
   { command: "/il", title: "Create an IL environment", description: "Describe a capability to teach through ideal demonstrations", kind: "prompt" },
   { command: "/rl", title: "Create an RL environment", description: "Describe a world, its goal, and the reward signal", kind: "prompt" },
+  { command: "/rsi", title: "Launch RSI agent panels", description: "Example: /rsi 3 — open three persistent coding agents", kind: "prompt" },
+  { command: "/learn", title: "Research and learn", description: "Verify a question, build grounded data, and adapt when appropriate", kind: "prompt" },
   { command: "/models", title: "Open Model Library", description: "Choose which local model to chat with", kind: "navigate", to: "/models" },
   { command: "/lab", title: "Open Optimus Lab", description: "Configure and launch a training run", kind: "navigate", to: "/studio" },
   { command: "/clear", title: "Clear this chat", description: "Start again without changing the selected model", kind: "clear" },
@@ -45,7 +48,10 @@ export default function ChatPage() {
   const [contextEstimate, setContextEstimate] = useState<ContextEstimate | null>(null);
   const [lastContextTokens, setLastContextTokens] = useState(0);
   const [copiedMessage, setCopiedMessage] = useState<number | null>(null);
+  const [learningSessions, setLearningSessions] = useState<Record<string, LearningSession>>({});
   const endRef = useRef<HTMLDivElement>(null);
+  const learningStreams = useRef<Record<string, EventSource>>({});
+  const completedLearning = useRef<Set<string>>(new Set());
   const navigate = useNavigate();
   const model = models.find((item) => item.id === modelId)?.name || savedModel?.name || "Qwen2.5-1.5B";
   const modelInfo = models.find((item) => item.id === modelId);
@@ -61,6 +67,7 @@ export default function ChatPage() {
     const chat = params.get("chat");
     setMessages(chat ? previousChats[chat] || [] : []);
     setLastContextTokens(0);
+    if (params.get("action") === "new-rsi") setInput("Launch 1 RSI agent panel");
   }, [params]);
 
   useEffect(() => { getModels().then((items) => {
@@ -72,6 +79,8 @@ export default function ChatPage() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, thinking]);
+
+  useEffect(() => () => Object.values(learningStreams.current).forEach((source) => source.close()), []);
 
   useEffect(() => {
     if (!modelId) return;
@@ -92,6 +101,20 @@ export default function ChatPage() {
     setInput("");
     setThinking(true);
     try {
+      const rsiSlash = clean.match(/^\/rsi(?:\s+(\d+))?(?:\s+(.+))?$/i);
+      const rsiNatural = clean.match(/\b(?:launch|open|start|create)\s+(?:(\d+)\s+)?(?:parallel\s+)?rsi\s+(?:agent\s+)?panels?\b(?:\s+(?:to|and)\s+(.+))?/i);
+      const rsiCommand = rsiSlash || rsiNatural;
+      if (rsiCommand) {
+        const count = Math.max(1, Math.min(6, Number(rsiCommand[1] || 1)));
+        const panels = await createRsiPanels(modelId, count, rsiCommand[2]?.trim() || "");
+        refreshWorkspaceTabs();
+        setMessages((current) => [...current, {
+          role: "assistant",
+          text: `${count === 1 ? "Your RSI agent panel is" : `${panels.length} parallel RSI agent panels are`} ready. Each is an isolated, persistent process using ${model}; open ${count === 1 ? "it" : "a panel"} to give it a file or coding task.`,
+          panelIds: panels.map((panel) => panel.id),
+        }]);
+        return;
+      }
       const command = clean.match(/^\/(il|rl)\s+(.+)/i);
       if (command) {
         const environment = await createEnvironmentFromChat(command[1].toUpperCase() as "IL" | "RL", command[2], modelId);
@@ -100,13 +123,35 @@ export default function ChatPage() {
       }
       const response = await sendChat(modelId, clean, messages, contextWindow);
       setLastContextTokens(response.context_tokens);
+      const learningId = response.learning_session?.id;
       setMessages((current) => [...current, {
         role: "assistant",
         text: response.answer,
         skills: response.active_skills.map((skill) => skill.name),
         tools: response.tool_calls.map((tool) => tool.name),
         tps: response.tokens_per_sec,
+        learningId,
       }]);
+      if (response.learning_session) {
+        const session = response.learning_session;
+        setLearningSessions((current) => ({ ...current, [session.id]: session }));
+        learningStreams.current[session.id]?.close();
+        learningStreams.current[session.id] = streamLearningEvents(session.id, async (event) => {
+          setLearningSessions((current) => ({
+            ...current,
+            [session.id]: { ...current[session.id], stage: event.stage, progress: event.progress },
+          }));
+          if ((event.stage === "completed" || event.stage === "failed") && !completedLearning.current.has(session.id)) {
+            completedLearning.current.add(session.id);
+            const final = await getLearningSession(session.id).catch(() => null);
+            if (final) {
+              setLearningSessions((current) => ({ ...current, [session.id]: final }));
+              if (final.final_answer) setMessages((current) => [...current, { role: "assistant", text: final.final_answer, learningId: final.id }]);
+            }
+            learningStreams.current[session.id]?.close();
+          }
+        });
+      }
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message.replace(/^\{"detail":"?|"\}$/g, "") : "The local request failed";
       setMessages((current) => [...current, { role: "assistant", text: clean.startsWith("/") ? `I could not build that environment: ${detail}` : detail }]);
@@ -173,7 +218,7 @@ export default function ChatPage() {
             {messages.map((message, index) => (
               <motion.article key={`${message.role}-${index}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className={`message ${message.role}`}>
                 <div className="message-avatar">{message.role === "assistant" ? <Bot /> : <User />}</div>
-                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.role === "assistant" && <>{(message.skills?.length || message.tools?.length || message.tps) && <div className="agent-activity">{message.skills?.map((skill) => <span key={skill}>Skill · {skill}</span>)}{message.tools?.map((tool) => <span key={tool}>Tool · {tool}</span>)}{message.tps ? <span>{message.tps.toFixed(1)} tok/s</span> : null}</div>}<div className="message-tools"><button type="button" onClick={() => copyText(message.text, index)} aria-label={copiedMessage === index ? "Copied" : "Copy response"} title={copiedMessage === index ? "Copied" : "Copy response"}>{copiedMessage === index ? <Check /> : <Copy />}</button><button type="button" aria-label="Regenerate"><RotateCcw /></button></div></>}</div>
+                <div><div className="message-meta">{message.role === "assistant" ? model : "You"}</div><p>{message.text}</p>{message.panelIds?.length ? <div className="rsi-panel-links">{message.panelIds.map((panelId, panelIndex) => <button key={panelId} onClick={() => navigate(`/rsi/${panelId}`)}><span><Bot />RSI Agent {panelIndex + 1}</span><ExternalLink /></button>)}</div> : null}{message.learningId && learningSessions[message.learningId] && learningSessions[message.learningId].status === "running" ? <div className="learning-card"><div className="learning-card-head"><span><BrainCircuit />Test-time learning</span><strong>{Math.round(learningSessions[message.learningId].progress * 100)}%</strong></div><div className="learning-track"><span style={{ width: `${learningSessions[message.learningId].progress * 100}%` }} /></div><div className="learning-stage"><span className="learning-orbit"><i /><i /><i /></span><div><strong>{learningSessions[message.learningId].stage.replaceAll("-", " ")}</strong><small>{learningSessions[message.learningId].method === "retrieval" ? "Fresh facts stay source-grounded" : "Grounded dataset → int4 QLoRA → held-out check"}</small></div></div><div className="learning-mini-steps"><span><Globe2 />Research</span><span><Database />Dataset</span><span><BrainCircuit />Adapt</span></div></div> : null}{message.role === "assistant" && <>{(message.skills?.length || message.tools?.length || message.tps) && <div className="agent-activity">{message.skills?.map((skill) => <span key={skill}>Skill · {skill}</span>)}{message.tools?.map((tool) => <span key={tool}>Tool · {tool}</span>)}{message.tps ? <span>{message.tps.toFixed(1)} tok/s</span> : null}</div>}<div className="message-tools"><button type="button" onClick={() => copyText(message.text, index)} aria-label={copiedMessage === index ? "Copied" : "Copy response"} title={copiedMessage === index ? "Copied" : "Copy response"}>{copiedMessage === index ? <Check /> : <Copy />}</button><button type="button" aria-label="Regenerate"><RotateCcw /></button></div></>}</div>
               </motion.article>
             ))}
             {thinking && <div className="thinking"><span /><span /><span /></div>}

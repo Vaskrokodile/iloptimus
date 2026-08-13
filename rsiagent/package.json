@@ -9,7 +9,10 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "dev": "bun src/index.ts"
+    "dev": "bun src/index.ts",
+    "headless": "bun src/headless.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest"

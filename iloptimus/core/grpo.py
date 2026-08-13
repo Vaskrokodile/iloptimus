@@ -234,7 +234,8 @@ class GRPOTrainer:
         has_lora = any("lora" in k.lower() for k, _ in model.named_modules())
         if not has_lora:
             from mlx_lm.tuner.utils import linear_to_lora_layers
-            num_layers = len(model.layers)
+            model.freeze()
+            num_layers = min(8, len(model.layers))
             lora_config = {"rank": 8, "scale": 1.0, "dropout": 0.0}
             linear_to_lora_layers(model, num_layers, lora_config)
             print(f"GRPO: Applied LoRA layers (rank 8) to {num_layers} layers")
@@ -420,7 +421,7 @@ class GRPOTrainer:
         # Detect the actual number of layers — hardcoding 16 when the model
         # has 28 (DeepSeek-R1-Distill-Qwen-1.5B) causes load_adapters to apply
         # LoRA to only 16/28 layers, producing a shape mismatch crash on reload.
-        num_layers = len(self.model.layers)
+        num_layers = min(8, len(self.model.layers))
         cfg = {
             "adapter_path": os.path.basename(path),
             "fine_tune_type": "lora",

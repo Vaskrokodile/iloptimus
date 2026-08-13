@@ -32,6 +32,8 @@ class SFTConfig:
     lora_rank: int = 8
     lora_scale: float = 0.1
     lora_dropout: float = 0.0
+    lora_layers: int = 8  # final transformer blocks; safe on 8GB unified memory
+    max_seq_length: int = 512
     memory_limit_gb: float = 3.0  # QLoRA on int4 uses less memory (was 3.5 for fp16)
     steps_per_eval: int = 20
     grad_clip: float = 1.0
@@ -47,6 +49,7 @@ def generate_sft_data(
     handle,
     domain: str,
     num_tasks: int | None = None,
+    task_offset: int = 0,
     max_reasoning_tokens: int = 512,
     max_answer_tokens: int = 512,
     on_progress: Callable[[int, int], None] | None = None,
@@ -61,7 +64,8 @@ def generate_sft_data(
     from .inference import THINK_CLOSE, THINK_OPEN, clear_cache, run_inference
 
     total = get_num_tasks(domain)
-    n = min(num_tasks or total, total)
+    task_offset = max(0, min(task_offset, total))
+    n = min(num_tasks or (total - task_offset), total - task_offset)
     examples: list[SFTExample] = []
 
     if domain.startswith("custom:"):
@@ -69,7 +73,8 @@ def generate_sft_data(
 
         environment = get_environment(domain.split(":", 1)[1])
         if environment and environment["mode"] == "IL":
-            for i, task in enumerate(environment["tasks"][:n]):
+            for relative_index, task in enumerate(environment["tasks"][task_offset : task_offset + n]):
+                i = task_offset + relative_index
                 ideal_response = task.get("ideal_response", "").strip()
                 if not ideal_response:
                     continue
@@ -79,7 +84,7 @@ def generate_sft_data(
             if examples:
                 return examples
 
-    for i in range(n):
+    for i in range(task_offset, task_offset + n):
         prompt = build_prompt(domain, i)
         inf = run_inference(
             handle,
@@ -110,7 +115,8 @@ def generate_sft_data(
 
             environment = get_environment(domain.split(":", 1)[1])
             if environment:
-                for i, task in enumerate(environment["tasks"][:n]):
+                for relative_index, task in enumerate(environment["tasks"][task_offset : task_offset + n]):
+                    i = task_offset + relative_index
                     expected = task.get("expected_answer") or "A response satisfying: " + ", ".join(
                         task.get("criteria", [])
                     )
@@ -136,7 +142,7 @@ def generate_sft_data(
         mod_name, pkg_id, filename = pkg_map[domain]
         tasks_mod = _load_module(mod_name, str(_taskset_path(pkg_id, filename)))
 
-        for i in range(n):
+        for i in range(task_offset, task_offset + n):
             prompt = build_prompt(domain, i)
             task = tasks_mod.TASKS[i]
 
@@ -204,8 +210,11 @@ def run_sft(
     # Apply LoRA layers to the model
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
-    # Apply LoRA to attention layers
-    num_layers = len(handle.model.layers)
+    # Freeze the base model before installing adapters. Otherwise
+    # value_and_grad follows every quantized base weight and a 1.5B model can
+    # consume enough gradient memory for macOS to terminate the process.
+    handle.model.freeze()
+    num_layers = min(config.lora_layers, len(handle.model.layers))
     lora_config = {
         "rank": config.lora_rank,
         "scale": config.lora_scale,
@@ -221,6 +230,8 @@ def run_sft(
             {"role": "assistant", "content": ex.response},
         ]
         tokens = handle.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        if config.max_seq_length > 1:
+            tokens = tokens[-config.max_seq_length:]
         train_data.append(tokens)
 
     # Optimizer — SGD is used instead of Adam because Adam's second moment
@@ -336,7 +347,7 @@ def run_sft(
     cfg = {
         "adapter_path": os.path.basename(adapter_path),
         "fine_tune_type": "lora",
-        "num_layers": len(handle.model.layers),
+        "num_layers": num_layers,
         "lora_parameters": {
             "rank": config.lora_rank,
             "scale": config.lora_scale,

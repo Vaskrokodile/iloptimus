@@ -324,7 +324,7 @@ export async function executeBuiltinTool(
           child.on("close", (code) => {
             clearTimeout(timer)
             out += `\n[exit code ${code}]`
-            resolveP({ name, content: truncate(out) })
+            resolveP({ name, isError: code !== 0, content: truncate(out) })
           })
           child.on("error", (e) => {
             clearTimeout(timer)

@@ -8,6 +8,7 @@ from .pipeline import (
     get_all_runs,
     get_run,
     run_pipeline,
+    run_pipeline_subprocess,
 )
 from .tasksets import TasksetInfo, get_all_tasksets, get_taskset
 
@@ -16,5 +17,5 @@ __all__ = [
     "get_all_models", "get_model", "check_compatibility", "CompatibilityResult",
     "get_all_tasksets", "get_taskset", "TasksetInfo",
     "RunConfig", "RunState", "create_run", "get_run", "get_all_runs",
-    "run_pipeline", "_stream_events",
+    "run_pipeline", "run_pipeline_subprocess", "_stream_events",
 ]

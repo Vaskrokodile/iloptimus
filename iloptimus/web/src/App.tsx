@@ -8,6 +8,8 @@ import EnvironmentBuilderPage from "./pages/EnvironmentBuilderPage";
 import MyEnvironmentsPage from "./pages/MyEnvironmentsPage";
 import EnvironmentPlayPage from "./pages/EnvironmentPlayPage";
 import AppErrorBoundary from "./components/AppErrorBoundary";
+import WorkspaceTabs from "./components/WorkspaceTabs";
+import RsiPanelPage from "./pages/RsiPanelPage";
 
 export default function App() {
   const location = useLocation();
@@ -16,6 +18,7 @@ export default function App() {
       <div className="app-shell">
         <Navbar />
         <main className="app-content">
+          <WorkspaceTabs />
           <AppErrorBoundary key={location.pathname}><Routes>
             <Route path="/" element={<ChatPage />} />
             <Route path="/models" element={<ModelLibraryPage />} />
@@ -23,6 +26,7 @@ export default function App() {
             <Route path="/pipelines" element={<EnvironmentBuilderPage />} />
             <Route path="/environments" element={<MyEnvironmentsPage />} />
             <Route path="/environments/:environmentId/play" element={<EnvironmentPlayPage />} />
+            <Route path="/rsi/:panelId" element={<RsiPanelPage />} />
           </Routes></AppErrorBoundary>
         </main>
       </div>

@@ -60,6 +60,10 @@ SKILL_KEYWORDS: dict[str, set[str]] = {
         "tutorial notebook",
         "research notebook",
     },
+    "knowledge-dataset": {
+        "dataset", "fine tune", "finetune", "qlora", "lora", "train on", "learn about",
+        "research this", "grounded data", "evaluation set",
+    },
 }
 
 SKILL_MIN_SCORES = {
@@ -67,6 +71,7 @@ SKILL_MIN_SCORES = {
     "playwright": 2,
     "security-best-practices": 1,
     "jupyter-notebook": 1,
+    "knowledge-dataset": 1,
 }
 
 

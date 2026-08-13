@@ -15,10 +15,13 @@ curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts
 ```
 
 The installer installs `uv` when needed, installs IL Optimus as an isolated
-command-line app, starts the server, prints the localhost URL, and opens it in
-the default browser. Later, start it again with:
+command-line app, builds a small native macOS app in `~/Applications`, starts
+the local service, and opens the desktop window. If native installation is not
+available, it prints the localhost URL and opens the default browser. Later,
+start either surface with:
 
 ```bash
+iloptimus desktop
 iloptimus serve
 ```
 
@@ -190,6 +193,8 @@ final = correctness × (0.6 + 0.4 × reasoning_quality)
 
 ```bash
 uv run iloptimus serve              # Start server + open browser
+uv run iloptimus install-desktop    # Build the native macOS app
+uv run iloptimus desktop            # Open the native macOS app
 uv run iloptimus hardware           # Print detected hardware info
 uv run iloptimus version            # Print version
 ```

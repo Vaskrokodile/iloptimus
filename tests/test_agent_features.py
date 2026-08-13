@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from iloptimus.core.hardware import GPUInfo, HardwareInfo
@@ -11,12 +12,20 @@ from iloptimus.core.tools import (
     looks_like_tool_call,
     normalize_tool_call,
     parse_tool_call,
+    parse_tool_calls,
     suggested_tool_call,
     tool_answer_needs_fallback,
     tool_result_fallback,
     validate_public_url,
 )
-from iloptimus.server import _trim_history, create_app
+from iloptimus.server import (
+    OpenAIChatRequest,
+    _openai_prompt,
+    _openai_response_payload,
+    _responses_tool_subset,
+    _trim_history,
+    create_app,
+)
 
 
 def test_packaged_skills_are_discoverable_and_frontend_routes_automatically():
@@ -24,6 +33,7 @@ def test_packaged_skills_are_discoverable_and_frontend_routes_automatically():
     assert {skill.id for skill in skills} == {
         "frontend-design",
         "jupyter-notebook",
+        "knowledge-dataset",
         "playwright",
         "security-best-practices",
     }
@@ -62,6 +72,35 @@ def test_tool_parser_accepts_nested_fenced_small_model_format_and_repairs_query(
     assert normalize_tool_call(call, "search the web for current MLX releases", {"web_search"}) == (
         "web_search",
         {"query": "search the web for current MLX releases"},
+    )
+
+
+def test_tool_parser_recovers_multiple_small_model_shorthand_calls():
+    response = """```json
+{"create_directory":{"path":"demo"}},
+{"write_file":{"path":"demo/add.py","content":"print(42)"}},
+{"run_command":{"command":"python add.py","cwd":"demo"}}
+```"""
+    assert parse_tool_calls(response) == [
+        ("create_directory", {"path": "demo"}),
+        ("write_file", {"path": "demo/add.py", "content": "print(42)"}),
+        ("run_command", {"command": "python add.py", "cwd": "demo"}),
+    ]
+
+
+def test_tool_parser_recovers_parameters_misplaced_beside_scalar_arguments():
+    response = '{"tool_name":"write_file","arguments":1060,"path":"proof/a.py","content":"print(1060)"}'
+    assert parse_tool_call(response) == (
+        "write_file",
+        {"path": "proof/a.py", "content": "print(1060)"},
+    )
+
+
+def test_tool_parser_repairs_truncated_outer_object_brace():
+    response = '{"tool_name":"write_file","arguments":{"path":"proof/a.py","content":"print(1)"}'
+    assert parse_tool_call(response) == (
+        "write_file",
+        {"path": "proof/a.py", "content": "print(1)"},
     )
 
 
@@ -150,10 +189,55 @@ def test_agent_metadata_endpoints(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     client = TestClient(create_app())
-    assert len(client.get("/api/skills").json()) == 4
+    assert len(client.get("/api/skills").json()) == 5
     tools = client.get("/api/tools").json()
     assert {tool["name"] for tool in tools["built_in"]} >= {"web_search", "web_fetch"}
     assert {server["id"] for server in tools["mcp_servers"]} == {"fetch", "time"}
     estimate = client.get("/api/models/qwen2.5-1.5b/context-estimate?context_window=8192")
     assert estimate.status_code == 200
     assert estimate.json()["context_window"] == 8192
+
+
+def test_openai_compatibility_prompt_and_native_tool_response():
+    request = OpenAIChatRequest(
+        model="qwen2.5-1.5b",
+        messages=[{"role": "user", "content": "Create demo/app.py"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Write a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                        "required": ["path", "content"],
+                    },
+                },
+            }
+        ],
+    )
+    prompt = _openai_prompt(request)
+    assert "write_file" in prompt
+    assert "Create demo/app.py" in prompt
+
+    payload = _openai_response_payload(
+        request,
+        '```json\n{"tool_name":"write_file","arguments":{"path":"demo/app.py","content":"print(5)"}}\n```',
+        20,
+    )
+    choice = payload["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "write_file"
+    assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"])["path"] == "demo/app.py"
+
+
+def test_responses_adapter_hides_irrelevant_codex_tools_from_small_models():
+    tools = [
+        {"type": "function", "name": "apply_patch", "description": "Patch files", "parameters": {}},
+        {"type": "function", "name": "exec_command", "description": "Run commands", "parameters": {}},
+        {"type": "function", "name": "request_user_input", "description": "Ask", "parameters": {}},
+    ]
+    assert _responses_tool_subset(tools, ["user: Reply only with READY."]) == []
+    selected = _responses_tool_subset(tools, ["user: Create hello.py and run it."])
+    assert [tool["function"]["name"] for tool in selected] == ["apply_patch", "exec_command"]

@@ -26,9 +26,13 @@ def runs_dir() -> Path:
     return app_home() / "runs"
 
 
+def learning_dir() -> Path:
+    return app_home() / "learning"
+
+
 def ensure_app_dirs() -> Path:
     root = app_home()
-    for path in (root, models_dir(), environments_dir(), runs_dir()):
+    for path in (root, models_dir(), environments_dir(), runs_dir(), learning_dir()):
         path.mkdir(parents=True, exist_ok=True)
     return root
 

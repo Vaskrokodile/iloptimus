@@ -86,6 +86,36 @@ export interface ChatResponse {
   context_utilization: number;
   active_skills: PromptSkillInfo[];
   tool_calls: Array<{ name: string; ok: boolean }>;
+  uncertainty: { score: number; needs_research: boolean; explicit: boolean; time_sensitive: boolean; reasons: string[] };
+  learning_session: LearningSession | null;
+}
+
+export interface LearningSession {
+  id: string;
+  model_id: string;
+  query: string;
+  initial_answer: string;
+  method: "retrieval" | "qlora-il" | "lora-il";
+  reason: string;
+  status: "running" | "completed" | "failed";
+  stage: string;
+  progress: number;
+  sources: Array<{ title: string; url: string }>;
+  dataset_path: string;
+  environment_id: string;
+  run_id: string;
+  final_answer: string;
+  error: string;
+  events?: LearningEvent[];
+}
+
+export interface LearningEvent {
+  sequence: number;
+  timestamp?: number;
+  stage: string;
+  message: string;
+  progress: number;
+  data?: Record<string, unknown>;
 }
 
 export interface TasksetInfo {
@@ -167,6 +197,8 @@ export interface RunConfig {
   precision: string;
   sft_iters: number;
   sft_lr: number;
+  sft_task_offset: number;
+  sft_tasks: number | null;
   grpo_iters: number;
   grpo_group_size: number;
   grpo_lr: number;
@@ -201,6 +233,29 @@ export interface LogEvent {
   level: string;
   message: string;
   data: Record<string, any>;
+}
+
+export interface RsiPanel {
+  id: string;
+  title: string;
+  model_id: string;
+  workspace: string;
+  status: "starting" | "ready" | "running" | "stopped" | "failed";
+  session_id: string;
+  created_at: number;
+  updated_at: number;
+  last_error: string;
+  pid: number | null;
+  events?: RsiEvent[];
+}
+
+export interface RsiEvent {
+  type: string;
+  sequence: number;
+  timestamp: number;
+  panelId?: string;
+  data?: Record<string, unknown>;
+  error?: string;
 }
 
 const API_BASE = "";
@@ -245,6 +300,56 @@ export async function sendChat(modelId: string, message: string, history: Array<
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export async function getRsiPanels(): Promise<RsiPanel[]> {
+  return fetchJSON("/api/rsi/panels");
+}
+
+export async function getRsiPanel(panelId: string): Promise<RsiPanel> {
+  return fetchJSON(`/api/rsi/panels/${panelId}`);
+}
+
+export async function createRsiPanels(modelId: string, count: number, task = ""): Promise<RsiPanel[]> {
+  const res = await fetch("/api/rsi/panels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId, count, task }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function promptRsiPanel(panelId: string, prompt: string): Promise<RsiPanel> {
+  const res = await fetch(`/api/rsi/panels/${panelId}/prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function stopRsiPanel(panelId: string): Promise<RsiPanel> {
+  const res = await fetch(`/api/rsi/panels/${panelId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export function streamRsiEvents(panelId: string, after: number, onEvent: (event: RsiEvent) => void): EventSource {
+  const source = new EventSource(`/api/rsi/panels/${panelId}/events?after=${after}`);
+  source.onmessage = (message) => onEvent(JSON.parse(message.data) as RsiEvent);
+  return source;
+}
+
+export async function getLearningSession(sessionId: string): Promise<LearningSession> {
+  return fetchJSON(`/api/learning/${sessionId}`);
+}
+
+export function streamLearningEvents(sessionId: string, onEvent: (event: LearningEvent) => void): EventSource {
+  const source = new EventSource(`/api/learning/${sessionId}/events`);
+  source.onmessage = (message) => onEvent(JSON.parse(message.data) as LearningEvent);
+  return source;
 }
 
 export async function getEnvironments(): Promise<EnvironmentSpec[]> {

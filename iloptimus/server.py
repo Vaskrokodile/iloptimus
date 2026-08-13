@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from dataclasses import asdict
+import re
+import time
+import uuid
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -31,7 +34,7 @@ from .core import (
     get_model,
     get_run,
     get_taskset,
-    run_pipeline,
+    run_pipeline_subprocess,
 )
 from .core.environment_framework import (
     build_task_prompt,
@@ -45,7 +48,20 @@ from .core.environments import (
     list_environments,
     save_environment,
 )
-from .core.inference import ModelHandle, load_model, run_inference
+from .core.inference import (
+    ModelHandle,
+    load_model,
+    run_completion,
+    run_inference,
+    run_source_completion,
+    run_tool_completion,
+)
+from .core.learning import (
+    LearningManager,
+    assess_uncertainty,
+    build_research_dataset,
+    select_learning_method,
+)
 from .core.model_store import (
     compatible_precision,
     download_model,
@@ -54,6 +70,7 @@ from .core.model_store import (
 )
 from .core.performance import estimate_context_performance, record_chat_performance
 from .core.pipeline import _run_in_executor
+from .core.rsi_panels import RsiPanelManager
 from .core.skills import list_prompt_skills, route_prompt_skills, skill_prompt
 from .core.stateful_environments import (
     StateMachineRuntime,
@@ -62,17 +79,20 @@ from .core.stateful_environments import (
     scaffold_simulator,
     simulate_response,
 )
-from .core.storage import app_home, ensure_app_dirs
+from .core.storage import app_home, ensure_app_dirs, run_dir
 from .core.tools import (
     execute_tool,
     ground_tool_answer,
     looks_like_tool_call,
     normalize_tool_call,
     parse_tool_call,
+    parse_tool_calls,
     suggested_tool_call,
     tool_definitions,
     tool_prompt,
     tools_public,
+    web_fetch,
+    web_search,
 )
 
 
@@ -83,6 +103,8 @@ class CreateRunRequest(BaseModel):
     precision: Optional[str] = None
     sft_iters: int = 100
     sft_lr: float = 1e-4
+    sft_task_offset: int = 0
+    sft_tasks: Optional[int] = None
     grpo_iters: int = 50
     grpo_group_size: int = 4
     grpo_lr: float = 1e-5
@@ -105,6 +127,27 @@ class ChatRequest(BaseModel):
 
 class DownloadModelRequest(BaseModel):
     precision: Optional[str] = None
+
+
+class OpenAIChatRequest(BaseModel):
+    model: str
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    stream: bool = False
+    max_tokens: int = 1024
+    temperature: float = 0.2
+    tool_choice: Any = None
+
+
+class CreateRsiPanelsRequest(BaseModel):
+    model_id: str
+    count: int = Field(default=1, ge=1, le=6)
+    workspace: Optional[str] = None
+    task: Optional[str] = None
+
+
+class RsiPromptRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=100_000)
 
 
 # Cache hardware detection
@@ -142,15 +185,637 @@ def _trim_history(history: list[dict[str, str]], budget: int) -> list[dict[str, 
     return list(reversed(kept))
 
 
+def _resolve_chat_model(model_id: str):
+    direct = get_model(model_id)
+    if direct:
+        return direct
+    normalized = model_id.lower()
+    return next(
+        (
+            model
+            for model in get_all_models()
+            if model.huggingface_id.lower() == normalized or model.name.lower() == normalized
+        ),
+        None,
+    )
+
+
+async def _load_chat_handle_unlocked(model_info) -> ModelHandle:
+    handle = _chat_models.get(model_info.id)
+    if handle is not None:
+        return handle
+    hw = _get_hardware()
+    precision = compatible_precision(model_info, hw)
+    source = resolve_model_source(model_info.id, precision, hw.recommended_backend)
+    if not source:
+        raise HTTPException(409, "Download this model from Model Library before using it")
+    handle = await _run_in_executor(
+        load_model,
+        model_info.huggingface_id,
+        precision,
+        source_override=source,
+    )
+    _chat_models.clear()
+    _chat_models[model_info.id] = handle
+    return handle
+
+
+def _openai_prompt(request: OpenAIChatRequest) -> str:
+    tool_specs = []
+    for tool in request.tools:
+        function = tool.get("function", tool)
+        if not isinstance(function, dict) or not function.get("name"):
+            continue
+        tool_specs.append(
+            {
+                "name": function["name"],
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {"type": "object", "properties": {}}),
+            }
+        )
+
+    sections = [
+        "You are the reasoning engine inside a local coding-agent harness. Follow system and user messages. "
+        "Use a tool when it is needed to inspect or change the real workspace; do not pretend that an action happened."
+    ]
+    if tool_specs:
+        required_tool = request.tool_choice == "required"
+        sections.append(
+            ("A tool call is REQUIRED for this turn. Do not explain or answer in prose. " if required_tool else "")
+            + "Call exactly ONE tool at a time, then wait for its result before deciding the next action. "
+            "Output only one JSON object with keys tool_name and arguments; do not use a code fence. "
+            "For write_file, copy the user's requested path exactly and write complete runnable source code, not the expected output; encode file line breaks as \\n inside content. "
+            "For run_command, use cwd for the containing directory. Never invent a tool. "
+            "Fill every required argument. Available tools:\n"
+            + json.dumps(tool_specs, ensure_ascii=False)
+        )
+
+    transcript: list[str] = []
+    for message in request.messages:
+        role = str(message.get("role", "user"))
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+        content = str(content or "")
+        if role == "assistant" and message.get("tool_calls"):
+            calls = message["tool_calls"]
+            transcript.append(f"assistant requested tools: {json.dumps(calls, ensure_ascii=False)}")
+        elif role == "tool":
+            transcript.append(f"tool result ({message.get('name', message.get('tool_call_id', 'tool'))}): {content}")
+        else:
+            transcript.append(f"{role}: {content}")
+    sections.append("Conversation:\n" + "\n".join(transcript))
+    return "\n\n".join(sections)
+
+
+def _openai_response_payload(request: OpenAIChatRequest, answer: str, tokens: int) -> dict[str, Any]:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    allowed_names = {
+        str(tool.get("function", tool).get("name"))
+        for tool in request.tools
+        if isinstance(tool.get("function", tool), dict) and tool.get("function", tool).get("name")
+    }
+    calls = [call for call in parse_tool_calls(answer) if call[0] in allowed_names]
+    message: dict[str, Any] = {"role": "assistant", "content": answer}
+    finish_reason = "stop"
+    if calls:
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": f"call_{uuid.uuid4().hex[:16]}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                }
+                for name, arguments in calls
+            ],
+        }
+        finish_reason = "tool_calls"
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": tokens, "total_tokens": tokens},
+    }
+
+
+def _responses_tool_subset(raw_tools: list[Any], transcript: list[str]) -> list[dict[str, Any]]:
+    """Keep Codex's large Responses tool catalogue usable on small local models."""
+    task_text = next(
+        (entry.lower() for entry in reversed(transcript) if entry.lower().startswith("user:")),
+        "",
+    )
+    needs_action = bool(
+        re.search(
+            r"\b(create|write|edit|modify|fix|build|implement|run|execute|test|verify|inspect|read|list|search|find)\b",
+            task_text,
+        )
+    )
+    if not needs_action:
+        return []
+
+    preferred = {
+        "apply_patch": 0,
+        "shell": 1,
+        "shell_command": 1,
+        "exec_command": 1,
+        "read_file": 2,
+        "write_file": 2,
+        "list_directory": 3,
+        "grep_search": 3,
+        "update_plan": 8,
+    }
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, tool in enumerate(raw_tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function" or not tool.get("name"):
+            continue
+        name = str(tool["name"])
+        lowered = name.lower()
+        score = preferred.get(lowered, 20)
+        if any(word in lowered for word in ("shell", "exec", "patch", "file", "read", "write", "list", "grep")):
+            score = min(score, 5)
+        if score >= 20:
+            continue
+        candidates.append(
+            (
+                score,
+                index,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": str(tool.get("description", ""))[:280],
+                        "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                },
+            )
+        )
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in candidates[:6]]
+
+
 def create_app() -> FastAPI:
     ensure_app_dirs()
     app = FastAPI(title="IL Optimus", version=__version__)
+    rsi_panels = RsiPanelManager()
+    learning = LearningManager()
+
+    async def run_training_exclusive(run_id: str) -> None:
+        """Give a training worker sole ownership of local model memory."""
+        from .core.inference import release_memory
+
+        async with _chat_model_lock:
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
+            await run_pipeline_subprocess(run_id)
+
+    async def run_learning_session(session_id: str) -> None:
+        session = learning.get(session_id)
+        if not session:
+            return
+        query = re.sub(r"^/learn\s+", "", session.query, flags=re.IGNORECASE).strip()
+        try:
+            learning.emit(session_id, "researching", "A research worker is finding public sources", 0.12)
+            search_query = re.sub(r"^(?:explain|describe|teach me|what is|how does)\s+", "", query, flags=re.IGNORECASE)
+            search_query = re.sub(r"^the\s+", "", search_query, flags=re.IGNORECASE)
+            search_query = search_query.rstrip(" .?")
+            search_query = re.sub(r"\b(?:and|but)\s+why\b.*$", "", search_query, flags=re.IGNORECASE).strip()
+            search_query += " official documentation"
+            search = await web_search(search_query)
+            rows = search.get("results", [])[:5]
+            fetches = await asyncio.gather(
+                *(web_fetch(str(row.get("url", ""))) for row in rows),
+                return_exceptions=True,
+            )
+            sources: list[dict[str, str]] = []
+            for row, fetched in zip(rows, fetches):
+                fetched_payload = fetched if isinstance(fetched, dict) else {}
+                text = str(fetched_payload.get("text") or row.get("snippet") or "").strip()
+                if not text:
+                    continue
+                sources.append({
+                    "title": str(row.get("title") or fetched_payload.get("url") or "Source"),
+                    "url": str(fetched_payload.get("url") or row.get("url") or ""),
+                    "text": text[:12_000],
+                })
+            if not sources:
+                raise RuntimeError("Research did not return a readable public source")
+            session.sources = [{"title": item["title"], "url": item["url"]} for item in sources]
+            learning.emit(session_id, "researching", f"Collected {len(sources)} readable sources", 0.28)
+
+            model_info = get_model(session.model_id)
+            if not model_info:
+                raise RuntimeError("The selected model no longer exists")
+            researched_answer = (
+                "Grounded research notes for: "
+                + query
+                + "\n\n"
+                + "\n\n".join(
+                    f"{source['title']}\n{re.sub(r'\\s+', ' ', source['text']).strip()[:1200]}\nSource: {source['url']}"
+                    for source in sources[:4]
+                )
+            )
+
+            dataset = build_research_dataset(query, sources)
+            if not dataset:
+                raise RuntimeError("No grounded training examples could be compiled")
+            dataset[0]["ideal_response"] = (
+                "<reasoning>I will answer from the verified research evidence and retain its citations.</reasoning>"
+                f"<answer>{researched_answer}</answer>"
+            )
+            dataset_path = learning.root / session.id / "dataset.jsonl"
+            dataset_path.parent.mkdir(parents=True, exist_ok=True)
+            with dataset_path.open("w", encoding="utf-8") as handle:
+                for example in dataset:
+                    handle.write(json.dumps(example, ensure_ascii=False) + "\n")
+            session.dataset_path = str(dataset_path)
+            learning.emit(session_id, "dataset", f"Built {len(dataset)} grounded IL demonstrations", 0.42)
+
+            if session.method == "retrieval":
+                learning.emit(session_id, "evaluating", "Fresh knowledge stays retrieval-grounded instead of being baked into weights", 0.82)
+                learning.complete(session_id, researched_answer)
+                return
+
+            environment = save_environment({
+                "name": f"Learned knowledge {session.id}",
+                "mode": "IL",
+                "goal": f"Answer the research question accurately from grounded evidence: {query}",
+                "description": f"Automatically compiled evidence-grounded IL dataset for: {query}",
+                "domain": "knowledge",
+                "reward": {"correctness": 0.75, "reasoning": 0.2, "efficiency": 0.05, "method": "evidence-grounded"},
+                "tasks": [
+                    {
+                        "name": f"Grounded evidence {index + 1}",
+                        "prompt": example["prompt"],
+                        "expected_answer": example["expected_answer"],
+                        "ideal_response": example["ideal_response"],
+                        "criteria": ["uses the saved evidence", "does not invent unsupported claims"],
+                        "grader": {"type": "contains_all", "terms": [term for term in re.findall(r"[A-Za-z0-9]{5,}", example["expected_answer"])[:2]] or ["Source"]},
+                        "difficulty": "medium",
+                    }
+                    for index, example in enumerate(dataset)
+                ],
+                "builder": {"model_id": session.model_id, "used_model_output": True},
+            })
+            session.environment_id = environment["id"]
+            learning.emit(session_id, "training", "Starting real int4 QLoRA IL adapter training", 0.5)
+
+            hw = _get_hardware()
+            precision = compatible_precision(model_info, hw)
+            source = resolve_model_source(model_info.id, precision, hw.recommended_backend)
+            if not source:
+                raise RuntimeError("The downloaded model source is unavailable")
+            config = RunConfig(
+                model_id=session.model_id,
+                taskset_id=environment["taskset_id"],
+                backend="mlx",
+                precision=precision,
+                sft_iters=1,
+                sft_lr=5e-4,
+                sft_task_offset=1,
+                sft_tasks=max(1, len(dataset) - 1),
+                grpo_iters=0,
+                benchmark_tasks=1,
+                rollouts_per_example=1,
+                max_seq_length=256,
+                max_reasoning_tokens=48,
+                max_answer_tokens=96,
+            )
+            run = create_run(config)
+            session.run_id = run.id
+            learning.emit(session_id, "training", f"Training run {run.id} is active", 0.56, run_id=run.id)
+            await run_training_exclusive(run.id)
+            completed = get_run(run.id)
+            if not completed or completed.status != "completed":
+                detail = completed.events[-1]["message"] if completed and completed.events else "Training failed"
+                raise RuntimeError(detail)
+
+            learning.emit(session_id, "evaluating", "Loading the learned adapter and answering without injected evidence", 0.92)
+            adapter_path = run_dir(run.id) / "adapters" / "sft"
+            async with _chat_model_lock:
+                from .core.inference import release_memory
+
+                await _run_in_executor(release_memory)
+                adapted_handle = await _run_in_executor(
+                    load_model,
+                    model_info.huggingface_id,
+                    precision,
+                    adapter_path=str(adapter_path),
+                    source_override=source,
+                )
+                learned = await _run_in_executor(run_inference, adapted_handle, query, 256, 512)
+                del adapted_handle
+                await _run_in_executor(release_memory)
+            final_answer = learned.answer or learned.text
+            if not final_answer.strip():
+                raise RuntimeError("The adapted model returned no answer")
+            if not re.search(r"https?://", final_answer):
+                final_answer += "\n\nResearch sources used for the learning run:\n" + "\n".join(
+                    f"• {source['title']} — {source['url']}" for source in sources[:4]
+                )
+            learning.complete(session_id, final_answer)
+        except Exception as error:
+            learning.fail(session_id, str(error))
+
+    @app.on_event("shutdown")
+    async def stop_rsi_workers():
+        await rsi_panels.shutdown()
 
     # ---- API routes ----
 
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "version": __version__, "data_dir": str(app_home())}
+
+    @app.get("/v1/models")
+    async def openai_models():
+        hw = _get_hardware()
+        data = []
+        for model in get_all_models():
+            precision = compatible_precision(model, hw)
+            if model_status(model.id, precision, hw.recommended_backend)["status"] == "downloaded":
+                data.append(
+                    {
+                        "id": model.id,
+                        "slug": model.id,
+                        "display_name": model.name,
+                        "description": "A locally hosted model managed by IL Optimus.",
+                        "default_reasoning_level": None,
+                        "supported_reasoning_levels": [],
+                        "shell_type": "shell_command",
+                        "visibility": "list",
+                        "minimal_client_version": [0, 99, 0],
+                        "supported_in_api": True,
+                        "priority": 1,
+                        "additional_speed_tiers": [],
+                        "service_tiers": [],
+                        "default_service_tier": None,
+                        "availability_nux": None,
+                        "upgrade": None,
+                        "base_instructions": "Use concise reasoning and call one workspace tool at a time when needed.",
+                        "model_messages": None,
+                        "supports_reasoning_summaries": False,
+                        "supports_reasoning_summary_parameter": False,
+                        "default_reasoning_summary": "none",
+                        "support_verbosity": False,
+                        "default_verbosity": None,
+                        "apply_patch_tool_type": None,
+                        "web_search_tool_type": "text",
+                        "truncation_policy": {"mode": "bytes", "limit": 10_000},
+                        "supports_parallel_tool_calls": False,
+                        "supports_image_detail_original": False,
+                        "max_context_window": model.context_length,
+                        "auto_compact_token_limit": int(model.context_length * 0.8),
+                        "experimental_supported_tools": [],
+                        "input_modalities": ["text"],
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "iloptimus-local",
+                        "context_length": model.context_length,
+                    }
+                )
+        return {"object": "list", "data": data, "models": data}
+
+    @app.post("/v1/responses")
+    async def openai_responses(request: Request):
+        payload = await request.json()
+        model_info = _resolve_chat_model(str(payload.get("model", "")))
+        if not model_info:
+            raise HTTPException(404, f"Unknown local model: {payload.get('model', '')}")
+        transcript: list[str] = []
+        for item in payload.get("input", []):
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "message")
+            if item_type == "function_call_output":
+                transcript.append(f"tool result ({item.get('call_id', 'tool')}): {item.get('output', '')}")
+                continue
+            role = str(item.get("role", "user"))
+            if role in {"system", "developer"}:
+                continue
+            content = item.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        parts.append(str(part.get("text") or part.get("input_text") or part.get("output_text") or ""))
+                    else:
+                        parts.append(str(part))
+                content = "\n".join(parts)
+            if role == "user":
+                content = re.sub(
+                    r"<environment_context\b[^>]*>.*?</environment_context>",
+                    "",
+                    str(content),
+                    flags=re.DOTALL | re.IGNORECASE,
+                ).strip()
+                if not content:
+                    continue
+            transcript.append(f"{role}: {content}")
+        # Codex's own policy remains enforced by Codex. Repeating its multi-thousand-token
+        # instruction block here overwhelms the small local model without adding authority.
+        transcript = transcript[-10:]
+        latest_user_index = next(
+            (index for index in range(len(transcript) - 1, -1, -1) if transcript[index].lower().startswith("user:")),
+            0,
+        )
+        transcript = transcript[latest_user_index:]
+        while len("\n".join(transcript)) > 12_000 and len(transcript) > 1:
+            transcript.pop(0)
+        tools = _responses_tool_subset(payload.get("tools", []), transcript)
+        chat_request = OpenAIChatRequest(
+            model=model_info.id,
+            messages=[{"role": "user", "content": "\n".join(transcript)}],
+            tools=tools,
+            # DeepSeek-R1 spends a substantial part of its budget in native
+            # reasoning before the visible answer. A 96-token default exposes
+            # truncated thoughts to Codex instead of a completed response.
+            max_tokens=max(96, min(int(payload.get("max_output_tokens") or 384), 384)),
+            temperature=0.1,
+        )
+        prompt = _openai_prompt(chat_request)
+        async with _chat_model_lock:
+            handle = await _load_chat_handle_unlocked(model_info)
+            result = await _run_in_executor(
+                run_completion,
+                handle,
+                prompt,
+                chat_request.max_tokens,
+                chat_request.temperature,
+            )
+        answer = result.answer or result.text
+        call = next(
+            (candidate for candidate in parse_tool_calls(answer) if candidate[0] in {tool["function"]["name"] for tool in tools}),
+            None,
+        )
+        response_id = f"resp_{uuid.uuid4().hex[:18]}"
+        created = int(time.time())
+        if call:
+            name, arguments = call
+            item_id = f"fc_{uuid.uuid4().hex[:18]}"
+            call_id = f"call_{uuid.uuid4().hex[:18]}"
+            arguments_text = json.dumps(arguments, ensure_ascii=False)
+            output_item = {
+                "id": item_id,
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments_text,
+                "status": "completed",
+            }
+        else:
+            item_id = f"msg_{uuid.uuid4().hex[:18]}"
+            output_item = {
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": answer, "annotations": []}],
+            }
+        response_payload = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created,
+            "status": "completed",
+            "model": model_info.id,
+            "output": [output_item],
+            "parallel_tool_calls": True,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": result.tokens_generated,
+                "total_tokens": result.tokens_generated,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+            "error": None,
+            "incomplete_details": None,
+        }
+        if not payload.get("stream", False):
+            return response_payload
+
+        async def responses_stream():
+            base = {**response_payload, "status": "in_progress", "output": []}
+            yield f"event: response.created\ndata: {json.dumps({'type': 'response.created', 'response': base})}\n\n"
+            if call:
+                added = {**output_item, "arguments": "", "status": "in_progress"}
+                yield f"event: response.output_item.added\ndata: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': added})}\n\n"
+                yield f"event: response.function_call_arguments.delta\ndata: {json.dumps({'type': 'response.function_call_arguments.delta', 'item_id': item_id, 'output_index': 0, 'delta': output_item['arguments']})}\n\n"
+                yield f"event: response.function_call_arguments.done\ndata: {json.dumps({'type': 'response.function_call_arguments.done', 'item_id': item_id, 'output_index': 0, 'name': output_item['name'], 'arguments': output_item['arguments']})}\n\n"
+            else:
+                added = {**output_item, "content": [], "status": "in_progress"}
+                yield f"event: response.output_item.added\ndata: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': added})}\n\n"
+                part = {"type": "output_text", "text": "", "annotations": []}
+                yield f"event: response.content_part.added\ndata: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': part})}\n\n"
+                yield f"event: response.output_text.delta\ndata: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': answer})}\n\n"
+                yield f"event: response.output_text.done\ndata: {json.dumps({'type': 'response.output_text.done', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'text': answer})}\n\n"
+                yield f"event: response.content_part.done\ndata: {json.dumps({'type': 'response.content_part.done', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': output_item['content'][0]})}\n\n"
+            yield f"event: response.output_item.done\ndata: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': output_item})}\n\n"
+            yield f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': response_payload})}\n\n"
+
+        return StreamingResponse(responses_stream(), media_type="text/event-stream")
+
+    @app.post("/v1/chat/completions")
+    async def openai_chat_completions(req: OpenAIChatRequest):
+        model_info = _resolve_chat_model(req.model)
+        if not model_info:
+            raise HTTPException(404, f"Unknown local model: {req.model}")
+        prompt = _openai_prompt(req)
+        max_tokens = max(32, min(req.max_tokens, 2048))
+
+        async with _chat_model_lock:
+            handle = await _load_chat_handle_unlocked(model_info)
+            if req.tool_choice == "required" and len(req.tools) == 1:
+                function = req.tools[0].get("function", req.tools[0])
+                function_name = str(function["name"])
+                fixed_arguments: dict[str, str] = {}
+                next_argument = None
+                next_argument_prefix = ""
+                if function_name == "write_file":
+                    requested_paths = re.findall(
+                        r"\b[\w.-]+(?:/[\w.-]+)*\.(?:py|js|ts|tsx|jsx|json|md|txt|html|css|sh)\b",
+                        prompt,
+                        flags=re.IGNORECASE,
+                    )
+                    if requested_paths:
+                        fixed_arguments["path"] = requested_paths[0]
+                        next_argument = "content"
+                        if requested_paths[0].lower().endswith(".py"):
+                            signature = re.search(r"\bimplement(?:ing)?\s+([A-Za-z_]\w*\([^)]*\))", prompt)
+                            if signature:
+                                next_argument_prefix = f"def {signature.group(1)}:\n"
+                if function_name == "write_file" and fixed_arguments.get("path"):
+                    source_result = await _run_in_executor(
+                        run_source_completion,
+                        handle,
+                        prompt,
+                        fixed_arguments["path"],
+                        max_tokens,
+                        max(0.0, min(req.temperature, 1.5)),
+                    )
+                    wrapped = json.dumps(
+                        {
+                            "tool_name": function_name,
+                            "arguments": {"path": fixed_arguments["path"], "content": source_result.answer},
+                        },
+                        ensure_ascii=False,
+                    )
+                    result = replace(source_result, text=wrapped, answer=wrapped)
+                else:
+                    result = await _run_in_executor(
+                        run_tool_completion,
+                        handle,
+                        prompt,
+                        function_name,
+                        max_tokens,
+                        max(0.0, min(req.temperature, 1.5)),
+                        fixed_arguments,
+                        next_argument,
+                        next_argument_prefix,
+                    )
+            else:
+                result = await _run_in_executor(
+                    run_completion,
+                    handle,
+                    prompt,
+                    max_tokens,
+                    max(0.0, min(req.temperature, 1.5)),
+                )
+
+        answer = result.answer or result.text
+        payload = _openai_response_payload(req, answer, result.tokens_generated)
+        if not req.stream:
+            return payload
+
+        async def completion_stream():
+            choice = payload["choices"][0]
+            message = choice["message"]
+            first_delta: dict[str, Any] = {"role": "assistant"}
+            if message.get("tool_calls"):
+                first_delta["tool_calls"] = [
+                    {
+                        "index": index,
+                        **tool_call,
+                    }
+                    for index, tool_call in enumerate(message["tool_calls"])
+                ]
+            else:
+                first_delta["content"] = message.get("content", "")
+            chunk = {
+                "id": payload["id"],
+                "object": "chat.completion.chunk",
+                "created": payload["created"],
+                "model": payload["model"],
+                "choices": [{"index": 0, "delta": first_delta, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            chunk["choices"] = [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(completion_stream(), media_type="text/event-stream")
 
     @app.get("/api/hardware")
     async def hardware():
@@ -182,6 +847,65 @@ def create_app() -> FastAPI:
     @app.get("/api/tools")
     async def tools():
         return tools_public()
+
+    @app.get("/api/rsi/panels")
+    async def list_rsi_panels():
+        return rsi_panels.list()
+
+    @app.post("/api/rsi/panels")
+    async def create_rsi_panels(req: CreateRsiPanelsRequest, request: Request):
+        model = _resolve_chat_model(req.model_id)
+        if not model:
+            raise HTTPException(404, "Model not found")
+        hw = _get_hardware()
+        precision = compatible_precision(model, hw)
+        if model_status(model.id, precision, hw.recommended_backend)["status"] != "downloaded":
+            raise HTTPException(409, "Download this model before launching an RSI panel")
+        workspace = Path(req.workspace).expanduser() if req.workspace else app_home() / "workspaces" / "default"
+        panels = []
+        base_url = str(request.base_url).rstrip("/")
+        for index in range(req.count):
+            panel = await rsi_panels.launch(
+                model_id=model.id,
+                workspace=workspace,
+                base_url=base_url,
+                title=f"RSI Agent {len(rsi_panels.list()) + 1}",
+                initial_prompt=req.task,
+            )
+            panels.append(panel)
+        return panels
+
+    @app.get("/api/rsi/panels/{panel_id}")
+    async def get_rsi_panel(panel_id: str):
+        panel = rsi_panels.get(panel_id)
+        if not panel:
+            raise HTTPException(404, "RSI panel not found")
+        return {**panel.public(), "events": rsi_panels.events(panel_id)}
+
+    @app.post("/api/rsi/panels/{panel_id}/prompt")
+    async def prompt_rsi_panel(panel_id: str, req: RsiPromptRequest):
+        try:
+            return await rsi_panels.prompt(panel_id, req.prompt)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @app.get("/api/rsi/panels/{panel_id}/events")
+    async def stream_rsi_panel_events(panel_id: str, after: int = 0):
+        if not rsi_panels.get(panel_id):
+            raise HTTPException(404, "RSI panel not found")
+
+        async def event_stream():
+            async for event in rsi_panels.stream_events(panel_id, after):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.delete("/api/rsi/panels/{panel_id}")
+    async def stop_rsi_panel(panel_id: str):
+        try:
+            return await rsi_panels.stop(panel_id)
+        except ValueError as error:
+            raise HTTPException(404, str(error)) from error
 
     @app.get("/api/models")
     async def models():
@@ -326,21 +1050,7 @@ def create_app() -> FastAPI:
             )
 
         async with _chat_model_lock:
-            handle = _chat_models.get(req.model_id)
-            if handle is None:
-                hw = _get_hardware()
-                precision = compatible_precision(model_info, hw)
-                source = resolve_model_source(req.model_id, precision, hw.recommended_backend)
-                if not source:
-                    raise HTTPException(409, "Download this model from Model Library before chatting")
-                handle = await _run_in_executor(
-                    load_model,
-                    model_info.huggingface_id,
-                    precision,
-                    source_override=source,
-                )
-                _chat_models.clear()
-                _chat_models[req.model_id] = handle
+            handle = await _load_chat_handle_unlocked(model_info)
 
             result = await _run_in_executor(
                 run_inference,
@@ -386,6 +1096,30 @@ def create_app() -> FastAPI:
         elif looks_like_tool_call(answer, available_tool_names):
             answer = "I could not turn the model's tool request into a valid action. Please try the request again."
 
+        assessment = assess_uncertainty(
+            req.message,
+            answer,
+            tool_failed=any(not event["ok"] for event in tool_events),
+        )
+        learning_session = None
+        if assessment.needs_research:
+            hw = _get_hardware()
+            precision = compatible_precision(model_info, hw)
+            training_available = (
+                hw.recommended_backend == "mlx"
+                and resolve_model_source(model_info.id, precision, hw.recommended_backend) is not None
+            )
+            method = select_learning_method(assessment, training_available=training_available)
+            session = learning.create(
+                req.model_id,
+                req.message,
+                answer,
+                method,
+                "; ".join(assessment.reasons) or "The answer needs external verification",
+            )
+            asyncio.create_task(run_learning_session(session.id))
+            learning_session = session.public()
+
         return {
             "answer": answer,
             "reasoning": result.reasoning,
@@ -396,6 +1130,8 @@ def create_app() -> FastAPI:
             "context_utilization": min(1.0, context_tokens / selected_context),
             "active_skills": [skill.public() for skill in active_skills],
             "tool_calls": tool_events,
+            "uncertainty": assessment.public(),
+            "learning_session": learning_session,
         }
 
     @app.get("/api/tasksets")
@@ -575,12 +1311,6 @@ def create_app() -> FastAPI:
         if not resolve_model_source(model.id, precision, backend):
             raise HTTPException(409, "Download this model from Model Library before training")
 
-        if _chat_models:
-            from .core.inference import release_memory
-
-            _chat_models.clear()
-            await _run_in_executor(release_memory)
-
         config = RunConfig(
             model_id=req.model_id,
             taskset_id=req.taskset_id,
@@ -588,6 +1318,8 @@ def create_app() -> FastAPI:
             precision=precision,
             sft_iters=req.sft_iters,
             sft_lr=req.sft_lr,
+            sft_task_offset=req.sft_task_offset,
+            sft_tasks=req.sft_tasks,
             grpo_iters=req.grpo_iters,
             grpo_group_size=req.grpo_group_size,
             grpo_lr=req.grpo_lr,
@@ -601,7 +1333,7 @@ def create_app() -> FastAPI:
         state = create_run(config)
 
         # Launch pipeline in background
-        asyncio.create_task(run_pipeline(state.id, config, hw))
+        asyncio.create_task(run_training_exclusive(state.id))
 
         return {"id": state.id, "status": state.status, "config": config.__dict__}
 
@@ -656,6 +1388,28 @@ def create_app() -> FastAPI:
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    @app.get("/api/learning/{session_id}")
+    async def get_learning_session(session_id: str):
+        session = learning.get(session_id)
+        if not session:
+            raise HTTPException(404, "Learning session not found")
+        return {**session.public(), "events": learning.events(session_id)}
+
+    @app.get("/api/learning/{session_id}/events")
+    async def stream_learning_events(session_id: str, after: int = 0):
+        if not learning.get(session_id):
+            raise HTTPException(404, "Learning session not found")
+
+        async def event_generator():
+            async for event in learning.stream(session_id, after):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # ---- Static frontend serving ----

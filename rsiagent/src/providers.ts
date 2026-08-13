@@ -118,11 +118,11 @@ class OpenAIProviderClient implements ProviderClient {
       model: model.id,
       messages: apiMessages,
       stream: true,
-      max_tokens: 16384,
+      max_tokens: Number(process.env.RSI_MAX_TOKENS || 4096),
     }
     if (tools.length) {
       body.tools = toOpenAITools(tools)
-      body.tool_choice = "auto"
+      body.tool_choice = tools.length === 1 ? "required" : "auto"
     }
     // Reasoning effort: only send if the model explicitly supports it via
     // effortParam, or if it's an o-series / reasoning model. Sending

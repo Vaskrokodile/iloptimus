@@ -11,5 +11,11 @@ echo "Installing IL Optimus…"
 uv tool install --force "git+https://github.com/Vaskrokodile/iloptimus.git"
 
 echo
-echo "IL Optimus is installed. Starting the local app…"
+echo "IL Optimus is installed."
+if [ "$(uname -s)" = "Darwin" ] && iloptimus install-desktop --force; then
+  echo "Opening the native desktop app…"
+  exec iloptimus desktop
+fi
+
+echo "Starting the local web app…"
 exec iloptimus serve

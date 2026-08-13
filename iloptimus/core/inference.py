@@ -16,7 +16,9 @@ Optimizations:
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +57,250 @@ class ModelHandle:
     adapter_path: Optional[str] = None
     # cache dir for downloaded models
     cache_dir: str = os.path.expanduser("~/.cache/iloptimus/models")
+
+
+def run_completion(
+    handle: ModelHandle,
+    prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.2,
+) -> InferenceResult:
+    """Single-pass completion for structured agent protocols.
+
+    Unlike ``run_inference``, this never injects a forced natural-language
+    answer prefix when a reasoning budget expires. That distinction is
+    essential for tool JSON: a controller must receive the model's actual
+    completion, not a fabricated ``The answer is`` continuation.
+    """
+    import mlx.core as mx
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    messages = [{"role": "user", "content": prompt}]
+    chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    started = time.time()
+    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    is_reasoning_model = "deepseek-r1" in handle.huggingface_id.lower()
+    reasoning = ""
+    if is_reasoning_model:
+        # Agent prompts typically place the native tool JSON just after a
+        # substantial reasoning trace. Preserve enough of that first pass to
+        # reach the model's own closing tag; short conversational completions
+        # still split evenly so they retain answer room.
+        reasoning_budget = max(32, int(max_tokens * (0.75 if max_tokens >= 256 else 0.5)))
+        answer_budget = max(32, max_tokens - reasoning_budget)
+        first = generate(
+            handle.model,
+            handle.tokenizer,
+            prompt=chat_text,
+            max_tokens=reasoning_budget,
+            sampler=sampler,
+            verbose=False,
+        ).strip()
+        if THINK_CLOSE in first:
+            reasoning, text = first.split(THINK_CLOSE, 1)
+            text = text.strip()
+        else:
+            reasoning = first
+            text = ""
+        if not text:
+            # DeepSeek-R1 often consumes a short completion entirely in thought.
+            # Close that phase and let it emit the real answer or tool object. We
+            # intentionally add no answer prefix or fabricated content.
+            answer_prompt = chat_text + first + ("" if THINK_CLOSE in first else THINK_CLOSE) + "\n"
+            text = generate(
+                handle.model,
+                handle.tokenizer,
+                prompt=answer_prompt,
+                max_tokens=answer_budget,
+                sampler=sampler,
+                verbose=False,
+            ).strip()
+    else:
+        text = generate(
+            handle.model,
+            handle.tokenizer,
+            prompt=chat_text,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            verbose=False,
+        ).strip()
+    if THINK_CLOSE in text:
+        extra_reasoning, text = text.rsplit(THINK_CLOSE, 1)
+        reasoning = (reasoning + "\n" + extra_reasoning).strip()
+        text = text.strip()
+    if text.startswith("<answer>") and text.endswith("</answer>"):
+        text = text[len("<answer>") : -len("</answer>")].strip()
+    elapsed = time.time() - started
+    try:
+        tokens = len(handle.tokenizer.encode(reasoning + text))
+    except Exception:
+        tokens = max(1, len(text) // 4)
+    mx.clear_cache()
+    return InferenceResult(
+        text=(reasoning + THINK_CLOSE + "\n" + text) if reasoning else text,
+        reasoning=reasoning,
+        answer=text,
+        elapsed=elapsed,
+        tokens_generated=tokens,
+        tokens_per_sec=tokens / max(elapsed, 1e-6),
+    )
+
+
+def run_tool_completion(
+    handle: ModelHandle,
+    prompt: str,
+    tool_name: str,
+    max_tokens: int = 384,
+    temperature: float = 0.1,
+    fixed_arguments: dict[str, str] | None = None,
+    next_argument: str | None = None,
+    next_argument_prefix: str = "",
+) -> InferenceResult:
+    """Generate arguments inside a fixed single-tool JSON envelope.
+
+    Small reasoning models often explain a required tool call instead of
+    emitting it. Supplying the protocol-only prefix is equivalent to grammar
+    constrained decoding: the model still authors every argument and file
+    byte, while the harness guarantees the outer call shape.
+    """
+    import mlx.core as mx
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    messages = [{"role": "user", "content": prompt}]
+    chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prefix = json.dumps({"tool_name": tool_name}, ensure_ascii=False)[:-1] + ', "arguments": {'
+    fixed_arguments = fixed_arguments or {}
+    fields = [f"{json.dumps(key)}: {json.dumps(value)}" for key, value in fixed_arguments.items()]
+    if fields:
+        prefix += ", ".join(fields) + ", "
+    if next_argument:
+        encoded_prefix = json.dumps(next_argument_prefix, ensure_ascii=False)[1:-1]
+        prefix += f'{json.dumps(next_argument)}: "{encoded_prefix}'
+    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    reasoning = ""
+    if "deepseek-r1" in handle.huggingface_id.lower():
+        reasoning = generate(
+            handle.model,
+            handle.tokenizer,
+            prompt=chat_text,
+            max_tokens=min(192, max(96, max_tokens // 2)),
+            sampler=sampler,
+            verbose=False,
+        ).strip()
+        if THINK_CLOSE in reasoning:
+            reasoning = reasoning.split(THINK_CLOSE, 1)[0].strip()
+        generation_prompt = chat_text + reasoning + THINK_CLOSE + "\n" + prefix
+    else:
+        generation_prompt = chat_text + prefix
+    started = time.time()
+    continuation = generate(
+        handle.model,
+        handle.tokenizer,
+        prompt=generation_prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+        verbose=False,
+    ).strip()
+    text = prefix + continuation
+    elapsed = time.time() - started
+    try:
+        tokens = len(handle.tokenizer.encode(reasoning + continuation))
+    except Exception:
+        tokens = max(1, len(continuation) // 4)
+    mx.clear_cache()
+    return InferenceResult(
+        text=text,
+        reasoning=reasoning,
+        answer=text,
+        elapsed=elapsed,
+        tokens_generated=tokens,
+        tokens_per_sec=tokens / max(elapsed, 1e-6),
+    )
+
+
+def run_source_completion(
+    handle: ModelHandle,
+    prompt: str,
+    path: str,
+    max_tokens: int = 384,
+    temperature: float = 0.1,
+) -> InferenceResult:
+    """Generate plain source text for a trusted write-file wrapper."""
+    import mlx.core as mx
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    language = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
+        ".sh": "bash",
+    }.get(Path(path).suffix.lower(), "text")
+    signatures = re.findall(r"\bimplement(?:ing)?\s+([A-Za-z_]\w*\([^)]*\))", prompt, flags=re.IGNORECASE)
+    contract = ""
+    if signatures:
+        contract = " The file MUST define exactly this requested callable: " + ", ".join(
+            f"def {signature}:" for signature in signatures
+        )
+    expected_output = re.search(r"output\s+(?:is\s+)?exactly\s+([^\s.,;]+)", prompt, flags=re.IGNORECASE)
+    if expected_output:
+        contract += (
+            f" The file MUST include an executable entry point that prints {expected_output.group(1)} "
+            "as its own output line when the requested command runs."
+        )
+    focused_prompt = (
+        prompt
+        + f"\n\nGenerate the complete runnable contents of {path}.{contract} Preserve every requested function name and signature exactly. "
+        "Output source code only; no explanation."
+    )
+    chat_text = handle.tokenizer.apply_chat_template(
+        [{"role": "user", "content": focused_prompt}], tokenize=False, add_generation_prompt=True
+    )
+    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    reasoning = ""
+    if "deepseek-r1" in handle.huggingface_id.lower():
+        reasoning = generate(
+            handle.model,
+            handle.tokenizer,
+            prompt=chat_text,
+            max_tokens=min(192, max(96, max_tokens // 2)),
+            sampler=sampler,
+            verbose=False,
+        ).strip()
+        if THINK_CLOSE in reasoning:
+            reasoning = reasoning.split(THINK_CLOSE, 1)[0].strip()
+        generation_prompt = chat_text + reasoning + THINK_CLOSE + f"\n```{language}\n"
+    else:
+        generation_prompt = chat_text + f"```{language}\n"
+    started = time.time()
+    source = generate(
+        handle.model,
+        handle.tokenizer,
+        prompt=generation_prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+        verbose=False,
+    ).strip()
+    if "```" in source:
+        source = source.split("```", 1)[0].rstrip()
+    elapsed = time.time() - started
+    try:
+        tokens = len(handle.tokenizer.encode(reasoning + source))
+    except Exception:
+        tokens = max(1, len(source) // 4)
+    mx.clear_cache()
+    return InferenceResult(
+        text=source,
+        reasoning=reasoning,
+        answer=source,
+        elapsed=elapsed,
+        tokens_generated=tokens,
+        tokens_per_sec=tokens / max(elapsed, 1e-6),
+    )
 
 
 def _local_model_path(hf_id: str, precision: str, cache_dir: str) -> Path:

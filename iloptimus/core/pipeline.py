@@ -18,6 +18,8 @@ import asyncio
 import concurrent.futures
 import functools
 import json
+import os
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -57,6 +59,8 @@ class RunConfig:
     precision: str = "int4"
     sft_iters: int = 20  # reduced from 100 — SFT just teaches format, GRPO does the heavy lifting
     sft_lr: float = 1e-3  # SGD with higher LR for visible changes
+    sft_task_offset: int = 0
+    sft_tasks: int | None = None
     grpo_iters: int = 10  # reduced from 50 — research shows diminishing returns after 10-20 iters
     grpo_group_size: int = 2  # reduced from 4 — 2-GRPO matches 16-GRPO per recent research
     grpo_lr: float = 1e-3  # SGD with higher LR for visible changes
@@ -233,6 +237,7 @@ async def _update_progress(run_id: str, progress: float, stage: str = ""):
 # Single-thread executor for MLX operations — MLX arrays are thread-local
 # and cannot be shared across threads, so all MLX work must run on the same thread
 _mlx_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+_pipeline_worker_lock = asyncio.Lock()
 
 
 async def _run_in_executor(func, *args, **kwargs):
@@ -241,6 +246,95 @@ async def _run_in_executor(func, *args, **kwargs):
     if kwargs:
         func = functools.partial(func, **kwargs)
     return await loop.run_in_executor(_mlx_executor, func, *args)
+
+
+def _sync_state_from_disk(run_id: str) -> RunState | None:
+    """Merge a worker's durable state into this server process.
+
+    MLX may terminate a process at the native Metal layer under memory pressure.
+    Training therefore runs in a child process; this function keeps the API's
+    in-memory object (and any open SSE stream referring to it) synchronized with
+    the atomic run.json written by that child.
+    """
+    state = _runs.get(run_id)
+    path = run_dir(run_id) / "run.json"
+    try:
+        fresh = RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError, KeyError):
+        return state
+    if state is None:
+        _runs[run_id] = fresh
+        return fresh
+    for name in RunState.__dataclass_fields__:
+        setattr(state, name, getattr(fresh, name))
+    return state
+
+
+async def run_pipeline_subprocess(run_id: str) -> RunState | None:
+    """Run a pipeline in an isolated worker and mirror progress into the API.
+
+    A Python exception is already handled inside :func:`run_pipeline`. Native
+    MLX/Metal aborts are different: they can kill the interpreter outright.
+    Isolating the full model lifecycle guarantees that a bad training run cannot
+    take down chat, saved workspaces, or localhost itself.
+    """
+    state = _runs.get(run_id)
+    if state is None:
+        return None
+
+    worker_log = run_dir(run_id) / "worker.log"
+    observed_events = len(state.events)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    async with _pipeline_worker_lock:
+        with worker_log.open("ab") as output:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "iloptimus.pipeline_worker",
+                run_id,
+                stdout=output,
+                stderr=output,
+                env=env,
+            )
+            try:
+                while process.returncode is None:
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
+                    state = _sync_state_from_disk(run_id) or state
+                    new_events = state.events[observed_events:]
+                    observed_events = len(state.events)
+                    queue = _event_queues.get(run_id)
+                    if queue:
+                        for event in new_events:
+                            queue.put_nowait(event)
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    process.terminate()
+                    await process.wait()
+                raise
+
+    state = _sync_state_from_disk(run_id) or state
+    if process.returncode and state.status not in {
+        RunStatus.COMPLETED.value,
+        RunStatus.FAILED.value,
+        RunStatus.CANCELLED.value,
+    }:
+        state.status = RunStatus.FAILED.value
+        state.elapsed_seconds = time.time() - state.started_at
+        _emit(
+            run_id,
+            state.stage,
+            "error",
+            f"Training worker exited unexpectedly (code {process.returncode}). "
+            f"The app stayed online; diagnostics are in {worker_log}",
+            worker_log=str(worker_log),
+            exit_code=process.returncode,
+        )
+        _persist_state(state)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +468,8 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         generate_sft_data,
         handle,
         domain=domain,
-        num_tasks=config.benchmark_tasks,
+        num_tasks=config.sft_tasks or config.benchmark_tasks,
+        task_offset=config.sft_task_offset,
         max_reasoning_tokens=config.max_reasoning_tokens,
         max_answer_tokens=config.max_answer_tokens,
         on_progress=on_data_progress,
@@ -393,6 +488,7 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         memory_limit_gb=3.0,  # QLoRA uses less memory (int4 is 1.2GB vs fp16 3.5GB)
         lora_scale=0.05,  # reduced from 0.1 — less aggressive to avoid model collapse
         grad_clip=1.0,
+        max_seq_length=config.max_seq_length,
     )
 
     losses: list[float] = []
@@ -570,15 +666,10 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         state.sft_loss_history = sft_losses
 
         # ---- Stage 5: Post-SFT benchmark ----
-        # Hot-swap SFT adapters onto the already-loaded model — no reload needed
+        # run_sft updates the live LoRA layers in-place. Re-loading that same
+        # adapter would try to wrap LoRALinear a second time and is invalid.
         if sft_adapter_path:
-            from .inference import swap_adapters
-            _emit(run_id, "benchmarking-post-sft", "info", "Swapping to SFT adapters (no model reload)...")
-            handle.model = await _run_in_executor(
-                swap_adapters,
-                handle.model,
-                sft_adapter_path,
-            )
+            _emit(run_id, "benchmarking-post-sft", "info", "Evaluating the trained in-memory SFT adapter...")
 
         post_sft_acc, post_sft_traces = await _benchmark_stage(
             run_id, config, handle, domain, "post-sft", 0.45, 0.55,
@@ -594,39 +685,45 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         state.metrics["post_sft_accuracy"] = post_sft_acc
         state.metrics["sft_improvement"] = improvement
 
-        # ---- Stage 6: GRPO RL training ----
-        grpo_rewards = await _grpo_stage(run_id, config, handle, domain, sft_adapter_path)
-        state.grpo_reward_history = grpo_rewards
+        if pipeline_mode == "IL":
+            # A demonstration-only environment has no executable reward objective.
+            # Calling this RL would be scientifically incorrect, so stop at QLoRA SFT.
+            _emit(run_id, "grpo-training", "info", "IL environment selected: RL/GRPO is intentionally skipped")
+            post_grpo_acc = post_sft_acc
+            post_grpo_traces = post_sft_traces
+            total_improvement = improvement
+            state.post_grpo_accuracy = post_grpo_acc
+            state.post_grpo_traces = post_grpo_traces
+            state.metrics["post_grpo_accuracy"] = post_grpo_acc
+            state.metrics["total_improvement"] = total_improvement
+        else:
+            # ---- Stage 6: GRPO RL training ----
+            grpo_rewards = await _grpo_stage(run_id, config, handle, domain, sft_adapter_path)
+            state.grpo_reward_history = grpo_rewards
 
-        # ---- Stage 7: Post-GRPO benchmark ----
-        # Hot-swap GRPO adapters — no model reload needed
-        grpo_adapter_path = str(run_dir(run_id) / "adapters" / "grpo")
-        from .inference import swap_adapters
-        _emit(run_id, "benchmarking-post-grpo", "info", "Swapping to GRPO adapters (no model reload)...")
-        handle.model = await _run_in_executor(
-            swap_adapters,
-            handle.model,
-            grpo_adapter_path,
-        )
+            # ---- Stage 7: Post-GRPO benchmark ----
+            # GRPO updates the same live LoRA modules in-place. Loading its
+            # checkpoint here would incorrectly wrap LoRALinear a second time.
+            _emit(run_id, "benchmarking-post-grpo", "info", "Evaluating the trained in-memory GRPO adapter...")
 
-        post_grpo_acc, post_grpo_traces = await _benchmark_stage(
-            run_id, config, handle, domain, "post-grpo", 0.85, 0.95,
-        )
-        state.post_grpo_accuracy = post_grpo_acc
-        state.post_grpo_traces = post_grpo_traces
-        total_improvement = post_grpo_acc - baseline_acc
-        _emit(
-            run_id, "benchmarking-post-grpo", "success",
-            f"Post-GRPO accuracy: {post_grpo_acc:.1%} ({total_improvement:+.1%} vs baseline)",
-            accuracy=post_grpo_acc, total_improvement=total_improvement,
-        )
-        state.metrics["post_grpo_accuracy"] = post_grpo_acc
-        state.metrics["total_improvement"] = total_improvement
+            post_grpo_acc, post_grpo_traces = await _benchmark_stage(
+                run_id, config, handle, domain, "post-grpo", 0.85, 0.95,
+            )
+            state.post_grpo_accuracy = post_grpo_acc
+            state.post_grpo_traces = post_grpo_traces
+            total_improvement = post_grpo_acc - baseline_acc
+            _emit(
+                run_id, "benchmarking-post-grpo", "success",
+                f"Post-GRPO accuracy: {post_grpo_acc:.1%} ({total_improvement:+.1%} vs baseline)",
+                accuracy=post_grpo_acc, total_improvement=total_improvement,
+            )
+            state.metrics["post_grpo_accuracy"] = post_grpo_acc
+            state.metrics["total_improvement"] = total_improvement
 
         # ---- Done ----
         _emit(
             run_id, "done", "success",
-            f"IL pipeline complete! {baseline_acc:.1%} -> {post_grpo_acc:.1%} ({total_improvement:+.1%})",
+            f"{pipeline_mode} pipeline complete! {baseline_acc:.1%} -> {post_grpo_acc:.1%} ({total_improvement:+.1%})",
             baseline=baseline_acc, final=post_grpo_acc, improvement=total_improvement,
         )
 

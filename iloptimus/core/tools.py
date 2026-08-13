@@ -175,7 +175,17 @@ async def web_fetch(url: str) -> dict[str, Any]:
 async def web_search(query: str) -> dict[str, Any]:
     if not query.strip():
         raise ValueError("Search query cannot be empty")
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query[:400])}"
+    original_query = query
+    query = re.sub(
+        r"^(?:please\s+)?(?:search|browse|look up|find)(?:\s+the)?(?:\s+web|\s+online|\s+on the internet)?(?:\s+for)?\s+",
+        "",
+        query.strip(),
+        flags=re.IGNORECASE,
+    )
+    query = re.split(r"\s+(?:and\s+)?(?:cite|include|provide)\s+(?:the\s+)?(?:official\s+)?sources?\b", query, 1, flags=re.IGNORECASE)[0]
+    query = re.split(r"\s+if you (?:cannot|can't)\b", query, 1, flags=re.IGNORECASE)[0]
+    query = query.strip(" .?!")[:220] or original_query.strip()[:220]
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     page = await web_fetch(url)
     # web_fetch strips HTML, so retrieve the fixed, already-validated search host
     async with httpx.AsyncClient(timeout=12, headers={"User-Agent": USER_AGENT}) as client:
@@ -183,7 +193,15 @@ async def web_search(query: str) -> dict[str, Any]:
         response.raise_for_status()
     parser = _SearchParser()
     parser.feed(response.text[:MAX_WEB_BYTES])
-    return {"query": query, "results": parser.results[:8], "search_page": page["url"]}
+    rows = parser.results[:8]
+    fetched = await asyncio.gather(
+        *(web_fetch(row["url"]) for row in rows[:3]),
+        return_exceptions=True,
+    )
+    for row, content in zip(rows[:3], fetched):
+        if isinstance(content, dict):
+            row["snippet"] = re.sub(r"\s+", " ", str(content.get("text", ""))).strip()[:1800]
+    return {"query": query, "results": rows, "search_page": page["url"]}
 
 
 _BINARY = {
@@ -246,6 +264,10 @@ def _call_payload(payload: Any) -> tuple[str, dict[str, Any]] | None:
     function = payload.get("function")
     if isinstance(function, dict):
         payload = function
+    if len(payload) == 1:
+        shorthand_name, shorthand_arguments = next(iter(payload.items()))
+        if isinstance(shorthand_name, str) and isinstance(shorthand_arguments, dict):
+            return shorthand_name.strip(), shorthand_arguments
     name = payload.get("name") or payload.get("tool") or payload.get("tool_name")
     arguments = payload.get("arguments", payload.get("input", payload.get("parameters", {})))
     if isinstance(arguments, str):
@@ -253,21 +275,47 @@ def _call_payload(payload: Any) -> tuple[str, dict[str, Any]] | None:
             arguments = json.loads(arguments)
         except json.JSONDecodeError:
             arguments = {}
-    if isinstance(name, str) and isinstance(arguments, dict):
+    if isinstance(name, str):
+        if not isinstance(arguments, dict):
+            arguments = {}
+        # Small models sometimes place valid parameter keys beside a malformed
+        # scalar ``arguments`` value. Recover those fields without guessing any
+        # tool-specific content.
+        reserved = {"name", "tool", "tool_name", "arguments", "input", "parameters", "source"}
+        for key, value in payload.items():
+            if key not in reserved and key not in arguments:
+                arguments[key] = value
         return name.strip(), arguments
     return None
 
 
 def parse_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
+    calls = parse_tool_calls(text)
+    return calls[0] if calls else None
+
+
+def parse_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Recover one or more native calls from strict and common small-model JSON shapes."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
     for candidate in _json_candidates(text):
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
+        payload = None
+        for suffix in ("", "}", "}}"):
+            try:
+                payload = json.loads(candidate + suffix)
+                break
+            except json.JSONDecodeError:
+                continue
+        if payload is None:
             continue
         call = _call_payload(payload)
-        if call:
-            return call
-    return None
+        if not call:
+            continue
+        key = json.dumps([call[0], call[1]], sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            calls.append(call)
+            seen.add(key)
+    return calls
 
 
 TOOL_ALIASES = {
@@ -347,6 +395,8 @@ def tool_answer_needs_fallback(text: str, available_names: set[str]) -> bool:
         "<tool_call>",
         "the answer is 100% correct",
         "```json",
+        '"search_page"',
+        '"results":',
     )
     return looks_like_tool_call(text, available_names) or any(marker in lowered for marker in broken_generation_markers)
 
@@ -360,8 +410,12 @@ def tool_result_fallback(name: str, payload: dict[str, Any]) -> str:
         rows = result.get("results", [])
         if rows:
             lines = ["I found these relevant sources:"]
-            lines.extend(f"• {row.get('title', 'Source')} — {row.get('url', '')}" for row in rows[:6])
+            for row in rows[:6]:
+                lines.append(f"• {row.get('title', 'Source')} — {row.get('url', '')}")
+                if row.get("snippet"):
+                    lines.append(f"  {str(row['snippet'])[:650]}")
             return "\n".join(lines)
+        return "I could not verify this from public search results. Try a narrower query or open an official URL directly."
     if name == "web_fetch" and isinstance(result, dict):
         text = str(result.get("text", "")).strip()
         return f"From {result.get('url', 'the requested page')}:\n\n{text[:6000]}"

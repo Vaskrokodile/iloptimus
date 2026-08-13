@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +29,9 @@ def main():
     subparsers.add_parser("hardware", help="Detect and print hardware info")
     subparsers.add_parser("doctor", help="Verify this machine can run local models and training")
     subparsers.add_parser("data-dir", help="Print the folder containing models, environments, and runs")
+    desktop_parser = subparsers.add_parser("install-desktop", help="Install the native macOS desktop app")
+    desktop_parser.add_argument("--force", action="store_true", help="Replace an existing app")
+    subparsers.add_parser("desktop", help="Open the native desktop app")
 
     args = parser.parse_args()
 
@@ -39,6 +43,27 @@ def main():
     if args.command == "data-dir":
         from .core.storage import ensure_app_dirs
         print(ensure_app_dirs())
+        return
+
+    if args.command == "install-desktop":
+        from .desktop import install_macos_app
+
+        try:
+            installed = install_macos_app(force=args.force)
+        except (RuntimeError, FileExistsError, subprocess.CalledProcessError) as error:
+            print(f"Desktop installation failed: {error}", file=sys.stderr)
+            raise SystemExit(2) from error
+        print(f"Installed IL Optimus at {installed}")
+        return
+
+    if args.command == "desktop":
+        from .desktop import launch_macos_app
+
+        try:
+            launch_macos_app()
+        except (RuntimeError, FileExistsError, subprocess.CalledProcessError) as error:
+            print(f"Could not open IL Optimus: {error}", file=sys.stderr)
+            raise SystemExit(2) from error
         return
 
     if args.command in {"hardware", "doctor"}:
