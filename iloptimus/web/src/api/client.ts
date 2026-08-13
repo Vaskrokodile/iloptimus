@@ -107,6 +107,8 @@ export interface LearningSession {
   baseline_artifact_path: string;
   adapted_artifact_path: string;
   accepted_adapter_path: string;
+  retrieved_skill_ids: string[];
+  generated_skill_path: string;
   framework_artifact_path: string;
   framework_evaluation: { passed?: boolean; score?: number };
   final_answer: string;

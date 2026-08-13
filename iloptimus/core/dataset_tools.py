@@ -29,10 +29,13 @@ class DatasetAudit:
     contaminated_rows: int
     short_rows: int
     repetitive_rows: int
+    low_quality_rows: int
     source_dominated_rows: int
     capped_rows: int
     source_count: int
     origin_count: int
+    mean_quality_score: float
+    minimum_quality_score: float
     dataset_sha256: str
 
     def public(self) -> dict[str, Any]:
@@ -168,6 +171,7 @@ def assemble_dataset(
     requested_features: list[str],
     target_examples: int = 128,
     chunk_chars: int = 2_400,
+    priority_features: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble source-balanced, provenance-carrying raw demonstrations."""
     root = dataset_workspace(workspace_id)
@@ -183,6 +187,7 @@ def assemble_dataset(
     if not sources:
         raise ValueError("The dataset workspace has no usable permissively licensed repository code")
     task_key = _normalize(task)
+    priority = set(priority_features or [])
     rows: list[dict[str, Any]] = []
     source_windows = [_windows(str(source["text"]), target_chars=chunk_chars, overlap_chars=64) for source in sources]
     max_windows = max((len(chunks) for chunks in source_windows), default=0)
@@ -195,6 +200,14 @@ def assemble_dataset(
                 continue
             features = [feature for feature in requested_features if _feature_in_text(feature, excerpt)]
             focus = ", ".join(features) or artifact_kind
+            quality_score = score_source_unit(excerpt, features)
+            curriculum_role = (
+                "integration"
+                if len(features) >= 3
+                else "remediation"
+                if priority.intersection(features)
+                else "capability"
+            )
             rows.append(
                 {
                     "prompt": (
@@ -209,6 +222,8 @@ def assemble_dataset(
                     "license": source.get("license", "documentation"),
                     "features": features,
                     "view": "implementation",
+                    "quality_score": quality_score,
+                    "curriculum_role": curriculum_role,
                 }
             )
     rows = _select_diverse_rows(rows, target_examples)
@@ -222,6 +237,7 @@ def assemble_dataset(
         "chunk_chars": chunk_chars,
         "target_examples": target_examples,
         "requested_features": requested_features,
+        "priority_features": sorted(priority),
         "path": str(path),
     }
     atomic_write_json(root / "dataset-assembly.json", assembly)
@@ -256,6 +272,7 @@ def expand_dataset(workspace_id: str, *, target_examples: int = 192) -> dict[str
                     "ideal_response": response,
                     "expected_answer": response[:1_200],
                     "view": "source-unit",
+                    "quality_score": score_source_unit(response, row.get("features", [])),
                 }
             )
         if len(expanded) >= target_examples:
@@ -294,6 +311,7 @@ def filter_dataset(
     near_duplicate_threshold: float = 0.84,
     minimum_response_chars: int = 220,
     maximum_rows: int = 512,
+    minimum_quality_score: float = 0.5,
 ) -> dict[str, Any]:
     """Remove exact/near duplicates, contamination, tiny rows, and source domination."""
     root = dataset_workspace(workspace_id)
@@ -301,12 +319,35 @@ def filter_dataset(
     if not input_path.exists():
         input_path = root / "dataset-raw.jsonl"
     rows = _read_jsonl(input_path)
+    feature_frequency: Counter[str] = Counter(
+        str(feature)
+        for row in rows
+        for feature in row.get("features", [])
+    )
+    # Enforce rare-capability reservations before per-source and per-origin
+    # caps. A sequential filter can otherwise spend an origin's allowance on
+    # generic rows before reaching its only island/accessibility example.
+    rows = [
+        row
+        for _, row in sorted(
+            enumerate(rows),
+            key=lambda item: (
+                min(
+                    (feature_frequency[str(feature)] for feature in item[1].get("features", [])),
+                    default=10**9,
+                ),
+                item[1].get("curriculum_role") != "remediation",
+                -float(item[1].get("quality_score") or 0.0),
+                item[0],
+            ),
+        )
+    ]
     accepted: list[dict[str, Any]] = []
     fingerprints: list[set[int]] = []
     exact: set[str] = set()
     source_counts: Counter[str] = Counter()
     holdout = _normalize(holdout_task)
-    exact_duplicates = near_duplicates = contaminated = short = repetitive = source_dominated = 0
+    exact_duplicates = near_duplicates = contaminated = short = repetitive = low_quality = source_dominated = 0
     max_per_source = 3
     max_per_origin = max(6, math.ceil(maximum_rows * 0.2))
     origin_counts: Counter[str] = Counter()
@@ -315,12 +356,16 @@ def filter_dataset(
         if len(response) < minimum_response_chars:
             short += 1
             continue
-        if _line_diversity(response) < 0.45:
-            repetitive += 1
-            continue
         normalized = _normalize(response)
         if holdout and holdout in normalized:
             contaminated += 1
+            continue
+        if _line_diversity(response) < 0.45:
+            repetitive += 1
+            continue
+        quality_score = float(row.get("quality_score") or score_source_unit(response, row.get("features", [])))
+        if quality_score < minimum_quality_score:
+            low_quality += 1
             continue
         digest = hashlib.sha256(normalized.encode()).hexdigest()
         if digest in exact:
@@ -342,7 +387,7 @@ def filter_dataset(
         fingerprints.append(fingerprint)
         source_counts[source] += 1
         origin_counts[origin] += 1
-        accepted.append({**row, "row_sha256": digest})
+        accepted.append({**row, "quality_score": quality_score, "row_sha256": digest})
     quality_rows = len(accepted)
     maximum_rows = max(24, min(2_048, maximum_rows))
     if len(accepted) > maximum_rows:
@@ -360,10 +405,17 @@ def filter_dataset(
         contaminated_rows=contaminated,
         short_rows=short,
         repetitive_rows=repetitive,
+        low_quality_rows=low_quality,
         source_dominated_rows=source_dominated,
         capped_rows=capped_rows,
         source_count=len({str(row.get("source_url") or "") for row in accepted}),
         origin_count=len({str(row.get("source_origin") or _source_origin(str(row.get("source_url") or ""))) for row in accepted}),
+        mean_quality_score=round(
+            sum(float(row.get("quality_score") or 0.0) for row in accepted) / max(1, len(accepted)), 4
+        ),
+        minimum_quality_score=round(
+            min((float(row.get("quality_score") or 0.0) for row in accepted), default=0.0), 4
+        ),
         dataset_sha256=dataset_hash,
     )
     atomic_write_json(root / "dataset-audit.json", audit.public())
@@ -376,6 +428,53 @@ def load_filtered_dataset(workspace_id: str) -> list[dict[str, Any]]:
 
 def load_source_bundle(workspace_id: str) -> list[dict[str, Any]]:
     return _read_jsonl(dataset_workspace(workspace_id) / "sources.jsonl")
+
+
+def curate_dataset(
+    workspace_id: str,
+    *,
+    task: str,
+    artifact_kind: str,
+    requested_features: list[str],
+    priority_features: list[str] | None = None,
+    assembled_examples: int = 144,
+    expanded_examples: int = 192,
+    maximum_rows: int = 80,
+    chunk_chars: int = 2_400,
+    minimum_response_chars: int = 1_000,
+    minimum_quality_score: float = 0.5,
+) -> dict[str, Any]:
+    """Run the deterministic assemble/expand/filter/audit pipeline in one tool call."""
+    started = datetime.now(UTC)
+    assembly = assemble_dataset(
+        workspace_id,
+        task=task,
+        artifact_kind=artifact_kind,
+        requested_features=requested_features,
+        target_examples=assembled_examples,
+        chunk_chars=chunk_chars,
+        priority_features=priority_features,
+    )
+    expansion = expand_dataset(workspace_id, target_examples=expanded_examples)
+    filtering = filter_dataset(
+        workspace_id,
+        holdout_task=task,
+        minimum_response_chars=minimum_response_chars,
+        maximum_rows=maximum_rows,
+        minimum_quality_score=minimum_quality_score,
+    )
+    coverage = audit_feature_coverage(load_filtered_dataset(workspace_id), requested_features)
+    result = {
+        "version": 1,
+        "workspace_id": workspace_id,
+        "assembly": assembly,
+        "expansion": expansion,
+        "filtering": filtering,
+        "feature_coverage": coverage,
+        "elapsed_ms": round((datetime.now(UTC) - started).total_seconds() * 1_000),
+    }
+    atomic_write_json(dataset_workspace(workspace_id) / "curation-manifest.json", result)
+    return result
 
 
 def audit_feature_coverage(
@@ -450,6 +549,26 @@ def _looks_like_code(text: str) -> bool:
     return len(text) >= 240 and sum(bool(re.search(marker, text, re.I)) for marker in markers) >= 2
 
 
+def score_source_unit(text: str, features: Iterable[str] = ()) -> float:
+    """Score reusable source mechanically; no model tokens are spent on curation."""
+    stripped = text.strip()
+    if not stripped:
+        return 0.0
+    score = 0.15
+    score += 0.22 if _looks_like_code(stripped) else 0.0
+    score += 0.14 if 600 <= len(stripped) <= 6_000 else 0.07 if len(stripped) >= 240 else 0.0
+    score += 0.12 * min(1.0, _line_diversity(stripped) / 0.8)
+    score += 0.15 * min(1.0, len(set(str(item) for item in features)) / 3)
+    score += 0.12 if re.search(r"\b(?:function|class|const|let|def|import|export)\b", stripped) else 0.0
+    score += 0.1 if re.search(r"(?:[;}\]])\s*$", stripped) else 0.0
+    longest_line = max((len(line) for line in stripped.splitlines()), default=0)
+    if longest_line > 1_200:
+        score -= 0.18
+    if re.search(r"\b(?:deprecated|legacy|polyfill|vendor|minified)\b", stripped, re.I):
+        score -= 0.08
+    return round(max(0.0, min(1.0, score)), 4)
+
+
 def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Greedily retain rare capabilities and underrepresented source origins."""
     remaining = list(enumerate(rows))
@@ -474,6 +593,7 @@ def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[st
                     ]
                 ),
                 remaining[position][1].get("view") == "implementation",
+                float(remaining[position][1].get("quality_score") or 0.0),
                 -remaining[position][0],
             ),
         )

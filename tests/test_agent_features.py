@@ -194,13 +194,16 @@ def test_agent_metadata_endpoints(tmp_path, monkeypatch):
     client = TestClient(create_app())
     assert len(client.get("/api/skills").json()) == 6
     tool_names = {tool["name"] for tool in client.get("/api/tools").json()["built_in"]}
-    assert {"scrape_source", "assemble_dataset", "expand_dataset", "filter_dataset"}.issubset(tool_names)
+    assert {"scrape_source", "curate_dataset", "assemble_dataset", "expand_dataset", "filter_dataset"}.issubset(
+        tool_names
+    )
     tools = client.get("/api/tools").json()
     assert {tool["name"] for tool in tools["built_in"]} >= {"web_search", "web_fetch"}
     assert {server["id"] for server in tools["mcp_servers"]} == {"fetch", "time"}
     estimate = client.get("/api/models/qwen2.5-1.5b/context-estimate?context_window=8192")
     assert estimate.status_code == 200
     assert estimate.json()["context_window"] == 8192
+    assert client.get("/api/learning-skills").json() == {"skills": []}
 
 
 def test_dataset_tools_execute_through_the_chat_tool_boundary(tmp_path, monkeypatch):
@@ -248,6 +251,44 @@ def test_dataset_tools_execute_through_the_chat_tool_boundary(tmp_path, monkeypa
     )
     assert filtered["ok"] is True
     assert filtered["result"]["accepted_rows"] > 0
+
+
+def test_one_call_automated_curator_executes_through_tool_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path))
+    source = "\n".join(
+        f"const shader{index} = new THREE.ShaderMaterial({{vertexShader, fragmentShader}});"
+        for index in range(90)
+    )
+    save_source_bundle(
+        "one-call",
+        [
+            {
+                "title": f"shader-{origin}",
+                "url": f"https://github.com/example-{origin}/shader/blob/main/main.js",
+                "text": source.replace("shader", f"shader{origin}"),
+                "license": "MIT",
+                "kind": "repository-code",
+            }
+            for origin in range(2)
+        ],
+    )
+    result = asyncio.run(
+        execute_tool(
+            "curate_dataset",
+            {
+                "workspace_id": "one-call",
+                "task": "private holdout",
+                "artifact_kind": "web",
+                "requested_features": ["three.js", "shader"],
+                "priority_features": ["shader"],
+                "minimum_response_chars": 800,
+                "maximum_rows": 32,
+            },
+            {},
+        )
+    )
+    assert result["ok"] is True
+    assert result["result"]["filtering"]["accepted_rows"] > 0
 
 
 def test_openai_compatibility_prompt_and_native_tool_response():

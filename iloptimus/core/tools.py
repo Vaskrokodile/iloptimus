@@ -25,6 +25,7 @@ import httpx
 from .dataset_tools import (
     assemble_dataset,
     create_dataset_workspace,
+    curate_dataset,
     expand_dataset,
     filter_dataset,
 )
@@ -80,6 +81,24 @@ BUILTIN_TOOLS = [
         },
     ),
     ToolDefinition(
+        "curate_dataset",
+        "Run deterministic assembly, expansion, quality scoring, decontamination, balancing, and capability audits in one call.",
+        {
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string"},
+                "task": {"type": "string"},
+                "artifact_kind": {"type": "string"},
+                "requested_features": {"type": "array", "items": {"type": "string"}},
+                "priority_features": {"type": "array", "items": {"type": "string"}},
+                "maximum_rows": {"type": "integer", "minimum": 24, "maximum": 2048},
+                "minimum_response_chars": {"type": "integer", "minimum": 220, "maximum": 4000},
+                "minimum_quality_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            },
+            "required": ["workspace_id", "task", "artifact_kind"],
+        },
+    ),
+    ToolDefinition(
         "assemble_dataset",
         "Assemble scraped sources into source-balanced implementation demonstrations.",
         {
@@ -89,6 +108,7 @@ BUILTIN_TOOLS = [
                 "task": {"type": "string"},
                 "artifact_kind": {"type": "string"},
                 "requested_features": {"type": "array", "items": {"type": "string"}},
+                "priority_features": {"type": "array", "items": {"type": "string"}},
                 "target_examples": {"type": "integer", "minimum": 24, "maximum": 512},
                 "chunk_chars": {"type": "integer", "minimum": 1_000, "maximum": 8_000},
             },
@@ -118,6 +138,7 @@ BUILTIN_TOOLS = [
                 "near_duplicate_threshold": {"type": "number", "minimum": 0.5, "maximum": 1.0},
                 "minimum_response_chars": {"type": "integer", "minimum": 220, "maximum": 4_000},
                 "maximum_rows": {"type": "integer", "minimum": 24, "maximum": 2048},
+                "minimum_quality_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
             "required": ["workspace_id", "holdout_task"],
         },
@@ -699,6 +720,22 @@ async def execute_tool(name: str, arguments: dict[str, Any], mcp_tools: dict[str
                 requested_features=[str(item) for item in arguments.get("requested_features", [])],
                 target_examples=max(24, min(512, int(arguments.get("target_examples") or 128))),
                 chunk_chars=max(1_000, min(8_000, int(arguments.get("chunk_chars") or 2_400))),
+                priority_features=[str(item) for item in arguments.get("priority_features", [])],
+            )
+        elif name == "curate_dataset":
+            result = curate_dataset(
+                str(arguments.get("workspace_id", "")),
+                task=str(arguments.get("task", "")),
+                artifact_kind=str(arguments.get("artifact_kind") or "code"),
+                requested_features=[str(item) for item in arguments.get("requested_features", [])],
+                priority_features=[str(item) for item in arguments.get("priority_features", [])],
+                maximum_rows=max(24, min(2_048, int(arguments.get("maximum_rows") or 80))),
+                minimum_response_chars=max(
+                    220, min(4_000, int(arguments.get("minimum_response_chars") or 1_000))
+                ),
+                minimum_quality_score=max(
+                    0.0, min(1.0, float(arguments.get("minimum_quality_score") or 0.5))
+                ),
             )
         elif name == "expand_dataset":
             result = expand_dataset(
@@ -718,6 +755,9 @@ async def execute_tool(name: str, arguments: dict[str, Any], mcp_tools: dict[str
                     min(4_000, int(arguments.get("minimum_response_chars") or 220)),
                 ),
                 maximum_rows=max(24, min(2_048, int(arguments.get("maximum_rows") or 512))),
+                minimum_quality_score=max(
+                    0.0, min(1.0, float(arguments.get("minimum_quality_score") or 0.5))
+                ),
             )
         elif name in mcp_tools:
             result = await call_mcp_tool(mcp_tools[name], arguments)

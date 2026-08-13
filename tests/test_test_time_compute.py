@@ -9,6 +9,7 @@ from iloptimus.core.test_time_compute import (
     build_artifact_dataset,
     derive_artifact_contract,
     evaluate_artifact,
+    fast_research_queries,
     framework_artifact_source,
     github_repository_search_terms,
     github_repository_url,
@@ -212,6 +213,46 @@ def test_method_and_adapter_acceptance_require_evidence_and_improvement():
     assert qlora.training["estimated_training_seconds"] <= 600
     assert qlora.training["mask_prompt"] is True
     assert qlora.training["seed"] == 0
+    assert qlora.training["optimizer_memory_strategy"] == "unified-memory"
+    assert qlora.training["target_epochs"] == 4
+    assert qlora.training["iterations"] > 234
+
+    pqlora = select_method(
+        contract=contract,
+        training_available=True,
+        source_count=8,
+        train_examples=96,
+        model_params_b=7,
+        memory_gb=16,
+        backend="cuda",
+        paged_optimizer_available=True,
+    )
+    assert pqlora.method == "pqlora-il"
+    assert pqlora.training["optimizer_memory_strategy"] == "paged"
+
+    cuda_without_paging = select_method(
+        contract=contract,
+        training_available=True,
+        source_count=8,
+        train_examples=96,
+        backend="cuda",
+        paged_optimizer_available=False,
+    )
+    assert cuda_without_paging.method == "qlora-il"
+
+    measured = select_method(
+        contract=contract,
+        training_available=True,
+        source_count=8,
+        train_examples=80,
+        model_params_b=1.5,
+        memory_gb=8,
+        measured_seconds_per_iteration=3.1,
+    )
+    assert measured.training["throughput_source"] == "measured-local-profile"
+    assert measured.training["seconds_per_iteration"] == 3.1
+    assert measured.training["estimated_training_seconds"] <= 600
+    assert measured.training["iterations"] < qlora.training["iterations"]
 
     rl = select_method(
         contract=contract,
@@ -285,3 +326,20 @@ def test_niche_research_requires_topical_sources_from_independent_origins():
     assert audit["passed"] is True
     assert audit["topic_sources"] == 2
     assert audit["topic_origins"] == 2
+
+
+def test_fast_research_planner_is_bounded_deterministic_and_failure_focused():
+    contract = derive_artifact_contract(
+        "Build a polished Three.js voxel Sakura island with custom shaders and animation"
+    )
+    diagnostics = [
+        "Requested feature is not implemented observably: shader",
+        "Requested feature is not implemented observably: voxel",
+    ]
+    first = fast_research_queries(contract, diagnostics)
+    second = fast_research_queries(contract, diagnostics)
+    assert first == second
+    assert len(first) <= 14
+    assert len(first) == len(set(first))
+    assert any("shader" in query.casefold() and "github" in query.casefold() for query in first)
+    assert any("voxel" in query.casefold() and "github" in query.casefold() for query in first)

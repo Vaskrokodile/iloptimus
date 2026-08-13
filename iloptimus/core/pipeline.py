@@ -567,11 +567,16 @@ async def _emit_sft_metrics(run_id, metrics, total):
         run_id,
         "sft-training",
         "metric",
-        f"SFT iter {metrics.iteration + 1}/{total}: loss={metrics.loss:.4f} | mem={metrics.peak_memory_gb:.1f}GB",
+        f"SFT iter {metrics.iteration + 1}/{total}: loss={metrics.loss:.4f} | "
+        f"{metrics.iterations_per_second:.3f} step/s | {metrics.tokens_per_second:.1f} tok/s | "
+        f"mem={metrics.peak_memory_gb:.1f}GB",
         iter=metrics.iteration + 1,
         total=total,
         loss=metrics.loss,
         peak_memory_gb=metrics.peak_memory_gb,
+        iterations_per_second=metrics.iterations_per_second,
+        tokens_per_second=metrics.tokens_per_second,
+        trained_tokens=metrics.trained_tokens,
     )
     progress = 0.2 + 0.25 * (metrics.iteration + 1) / total
     await _update_progress(run_id, progress, "sft-training")

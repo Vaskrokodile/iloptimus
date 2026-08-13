@@ -15,17 +15,23 @@ Use this workflow when a question exposes missing, stale, or uncertain knowledge
    its mechanical audit passes. For a named niche subject, require at least two
    topic-specific sources from two independent origins; generic techniques do
    not prove subject coverage.
-5. Call `scrape_source` for documents, then `assemble_dataset` to construct
-   provenance-carrying prompt/response rows. In repositories, prefer first-party
+5. Call `scrape_source` for documents, then prefer one `curate_dataset` call to
+   run assembly, deterministic expansion, quality scoring, decontamination,
+   balancing, and capability audits. Use the individual `assemble_dataset`,
+   `expand_dataset`, and `filter_dataset` tools only when inspecting or repairing
+   one stage. In repositories, prefer first-party
    `src`, `main`, `index`, and feature-named files over vendored, generated,
    minified, legacy, or dependency code.
-6. Call `expand_dataset` only for deterministic views of saved evidence. Never
+6. Expand only into deterministic views of saved evidence. Never
    use expansion to invent facts or APIs. For source-generation training, keep
    multi-kilobyte syntax-aware implementation units; repeated tiny completions
    teach premature end-of-sequence behavior.
-7. Call `filter_dataset` and inspect exact duplicates, 5-token-shingle near
+7. Inspect exact duplicates, 5-token-shingle near
    duplicates, within-row repetition, repository-origin domination, short rows,
-   and holdout contamination. Keep these rejection counts separate.
+   low-quality code, and holdout contamination. Keep these rejection counts
+   separate. Prioritize failed capabilities and multi-capability integration
+   units; do not spend model tokens judging properties deterministic code can
+   measure.
 8. Audit every requested capability after filtering. Require at least four
    demonstrations from two files and two independent repository origins for
    each capability; stop instead of training when a capability is sparse.

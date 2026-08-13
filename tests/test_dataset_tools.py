@@ -5,10 +5,12 @@ from iloptimus.core.dataset_tools import (
     assemble_dataset,
     audit_feature_coverage,
     create_dataset_workspace,
+    curate_dataset,
     expand_dataset,
     filter_dataset,
     load_filtered_dataset,
     save_source_bundle,
+    score_source_unit,
 )
 
 
@@ -194,3 +196,52 @@ def test_artifact_units_can_filter_short_eos_targets(monkeypatch, tmp_path: Path
     )
     assert audit["accepted_rows"] > 0
     assert all(len(str(row["ideal_response"])) >= 1_000 for row in load_filtered_dataset("long-units"))
+
+
+def test_automated_curator_prioritizes_failures_and_records_quality(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path))
+    sources = []
+    for feature in ("voxel", "shader", "animation"):
+        for origin in range(2):
+            if feature == "voxel":
+                statement = "new THREE.InstancedMesh(new THREE.BoxGeometry(), material, 32)"
+            elif feature == "shader":
+                statement = "new THREE.ShaderMaterial({vertexShader, fragmentShader})"
+            else:
+                statement = "requestAnimationFrame(animate); renderer.render(scene, camera)"
+            body = "\n".join(f"const {feature}{origin}_{index} = {statement};" for index in range(80))
+            sources.append(
+                {
+                    "title": f"{feature}-{origin}",
+                    "url": f"https://github.com/org-{origin}/{feature}/blob/main/source.js",
+                    "text": body,
+                    "license": "MIT",
+                    "kind": "repository-code",
+                }
+            )
+    save_source_bundle("auto-curate", sources)
+    result = curate_dataset(
+        "auto-curate",
+        task="held-out private task",
+        artifact_kind="web",
+        requested_features=["three.js", "voxel", "shader", "animation"],
+        priority_features=["voxel", "shader", "animation"],
+        assembled_examples=48,
+        expanded_examples=64,
+        maximum_rows=48,
+        chunk_chars=1_400,
+        minimum_response_chars=800,
+    )
+    assert result["elapsed_ms"] >= 0
+    assert result["filtering"]["low_quality_rows"] >= 0
+    assert result["filtering"]["mean_quality_score"] >= 0.5
+    assert result["feature_coverage"]["passed"] is True
+    rows = load_filtered_dataset("auto-curate")
+    assert any(row["curriculum_role"] == "remediation" for row in rows)
+    assert all(float(row["quality_score"]) >= 0.5 for row in rows)
+
+
+def test_source_quality_penalizes_minified_or_legacy_units():
+    good = "\n".join(f"const mesh{index} = new THREE.BoxGeometry();" for index in range(40))
+    bad = "const legacy=" + "x" * 1800 + "; // deprecated minified vendor"
+    assert score_source_unit(good, ["three.js", "voxel"]) > score_source_unit(bad, [])

@@ -135,6 +135,8 @@ class LearningSession:
     framework_evaluation: dict[str, Any] = field(default_factory=dict)
     acceptance: dict[str, Any] = field(default_factory=dict)
     accepted_adapter_path: str = ""
+    retrieved_skill_ids: list[str] = field(default_factory=list)
+    generated_skill_path: str = ""
     final_answer: str = ""
     error: str = ""
     created_at: float = field(default_factory=time.time)

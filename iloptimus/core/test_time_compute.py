@@ -326,11 +326,13 @@ def artifact_generation_prompt(
     contract: ArtifactContract,
     *,
     verifier_feedback: list[str] | None = None,
+    skill_guardrails: str = "",
 ) -> str:
     requirements = ", ".join(contract.requested_features) or "the requested behavior"
     feedback = ""
     if verifier_feedback:
         feedback = "\nThe prior attempt failed these objective checks:\n- " + "\n- ".join(verifier_feedback[:12])
+    memory = f"\nRetrieved failure-pattern guardrails:\n{skill_guardrails}" if skill_guardrails else ""
     if contract.artifact_kind == "web":
         return (
             f"Build this artifact: {strip_learning_command(query)}\n"
@@ -338,12 +340,12 @@ def artifact_generation_prompt(
             "Use browser-native HTML/CSS/JavaScript; CDN ES modules are allowed. Do not use build tools, placeholders, "
             "markdown fences, or explanatory prose. Implement real behavior rather than merely mentioning requirements. "
             f"Observable requirements: {requirements}. Target at least {contract.minimum_bytes} bytes of purposeful source."
-            f"{feedback}"
+            f"{feedback}{memory}"
         )
     return (
         f"Implement this task in {contract.entrypoint}: {strip_learning_command(query)}. "
         "Return complete runnable source only, without placeholders or markdown fences. "
-        f"Observable requirements: {requirements}.{feedback}"
+        f"Observable requirements: {requirements}.{feedback}{memory}"
     )
 
 
@@ -382,6 +384,48 @@ def research_queries(query: str, contract: ArtifactContract, limit: int = 6) -> 
     return list(dict.fromkeys(candidate for candidate in candidates if len(candidate) > 12))[:limit]
 
 
+def fast_research_queries(
+    contract: ArtifactContract,
+    diagnostics: list[str] | None = None,
+    *,
+    limit: int = 14,
+) -> list[str]:
+    """Plan a small deterministic search frontier instead of spending an inference pass on query prose."""
+    diagnostics_text = " ".join(diagnostics or []).casefold()
+    subtasks = research_subtasks("", contract)
+    failed_features = {
+        feature
+        for feature in contract.requested_features
+        if feature.casefold() in diagnostics_text
+    }
+    ordered = sorted(
+        subtasks,
+        key=lambda item: (
+            item.id == "integration",
+            item.capability not in failed_features,
+            item.capability not in {"sakura", "island"},
+        ),
+    )
+    selected: list[str] = []
+    for subtask in ordered:
+        query_budget = 2 if subtask.capability in failed_features | {"sakura", "island", "integration"} else 1
+        repository_queries = [
+            query
+            for query in subtask.queries
+            if any(marker in query.casefold() for marker in ("github", "source code", "implementation"))
+        ]
+        documentation_queries = [query for query in subtask.queries if "official" in query.casefold()]
+        candidates = repository_queries[:query_budget]
+        if "web-documentation" in subtask.required_kinds:
+            candidates.extend(documentation_queries[:1])
+        for query in candidates or subtask.queries[:query_budget]:
+            if query not in selected:
+                selected.append(query)
+            if len(selected) >= limit:
+                return selected
+    return selected
+
+
 def select_method(
     *,
     contract: ArtifactContract,
@@ -395,6 +439,9 @@ def select_method(
     multi_step_rollout: bool = False,
     deterministic_reward: bool = False,
     maximum_training_seconds: int = 600,
+    backend: str = "mlx",
+    paged_optimizer_available: bool = False,
+    measured_seconds_per_iteration: float | None = None,
 ) -> MethodDecision:
     reasons: list[str] = []
     verifier = contract.task_type == "artifact"
@@ -407,36 +454,45 @@ def select_method(
     if not training_available:
         reasons.append("The selected hardware/model cannot run local adapter training")
         return MethodDecision("retrieval", tuple(reasons), verifier, training_available, {})
-    method = "qlora-il" if quantized else "lora-il"
+    paged_qlora = quantized and backend in {"cuda", "torch", "vllm"} and paged_optimizer_available
+    method = "pqlora-il" if paged_qlora else "qlora-il" if quantized else "lora-il"
     if multi_step_rollout and deterministic_reward:
-        method = "qlora-il+grpo" if quantized else "lora-il+grpo"
+        method = f"{method}+grpo"
         reasons.append("A real multi-step rollout and deterministic reward justify an RL phase after IL warm-up")
     elif verifier:
         reasons.append("Reference implementations provide demonstrations and an executable artifact verifier")
-        reasons.append("QLoRA-IL is selected; RL requires a real multi-step rollout, not a one-shot score")
+        reasons.append(f"{method.upper()} is selected; RL requires a real multi-step rollout, not a one-shot score")
     else:
         reasons.append("Grounded stable demonstrations are available")
-    # Paged QLoRA is not a distinct objective. MLX unified memory plus compiled
-    # QLoRA provides the relevant memory behavior without mislabeling the method.
+    if quantized and not paged_qlora:
+        reasons.append(
+            "Paged QLoRA is unavailable on this backend; MLX unified-memory QLoRA is used without relabeling it"
+        )
+    elif paged_qlora:
+        reasons.append("A real paged optimizer is available on CUDA, so optimizer states can spill safely")
     if memory_gb < model_params_b * 1.3 + 2.0:
         reasons.append("Use compiled quantized adapters with checkpointing because unified memory is constrained")
     compact_mlx_profile = memory_gb <= 8 and model_params_b <= 2
     batch_size = 2 if memory_gb >= 16 else 1
     grad_accumulation = 2 if memory_gb >= 16 else 1
-    target_epochs = 3 if compact_mlx_profile else 3 if train_examples >= 96 else 5
+    target_epochs = 4 if compact_mlx_profile else 3 if train_examples >= 96 else 5
     # mlx-lm's `iters` counts microbatches, while optimizer updates happen only
     # after gradient accumulation. Count both explicitly so the stated epoch
     # coverage is real and not accidentally divided by accumulation.
     requested_microbatches = math.ceil(train_examples * target_epochs / batch_size)
-    iteration_cap = 300 if memory_gb >= 16 else 240
+    iteration_cap = 320 if compact_mlx_profile else 300 if memory_gb >= 16 else 240
     iterations = min(iteration_cap, max(64, requested_microbatches))
     if maximum_training_seconds <= 180:
         iterations = min(iterations, 64)
-    # The audited cache and native 32-token bucket profile recovered about 13%
-    # over the original full run. Keep a conservative 2.5 s/iteration budget
-    # on 8 GB M1 so near-three-epoch runs still fit the ten-minute envelope.
-    seconds_per_iteration = 2.5 if compact_mlx_profile else 2.0
-    runtime_overhead_seconds = 15
+    # The measured long run completed 234 updates plus load/benchmarks in
+    # 453.8 seconds. Keep headroom for thermal variance while spending the
+    # recovered budget on a fourth data pass rather than idle orchestration.
+    default_seconds_per_iteration = 1.85 if compact_mlx_profile else 2.0
+    seconds_per_iteration = max(
+        default_seconds_per_iteration,
+        float(measured_seconds_per_iteration or 0.0),
+    )
+    runtime_overhead_seconds = 25
     budget_iteration_cap = max(
         32,
         math.floor((maximum_training_seconds - runtime_overhead_seconds) / seconds_per_iteration),
@@ -465,8 +521,12 @@ def select_method(
         "mask_prompt": True,
         "seed": 0,
         "grad_checkpoint": memory_gb < model_params_b * 1.3 + 2.0,
+        "optimizer_memory_strategy": "paged" if paged_qlora else "unified-memory" if backend == "mlx" else "resident",
+        "backend": backend,
         "maximum_training_seconds": maximum_training_seconds,
         "estimated_training_seconds": round(iterations * seconds_per_iteration + runtime_overhead_seconds),
+        "seconds_per_iteration": round(seconds_per_iteration, 4),
+        "throughput_source": "measured-local-profile" if measured_seconds_per_iteration else "hardware-default",
     }
     return MethodDecision(method, tuple(reasons), verifier, training_available, training)
 
@@ -549,7 +609,11 @@ def _runtime_render(path: Path) -> tuple[bool, str, str]:
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        timeout=30,
+                        # Animated artifacts can keep Chrome's event loop alive
+                        # after the screenshot is already written. Bound this
+                        # verifier overhead; a timed-out process still needs a
+                        # nonblank screenshot and a clean console to pass.
+                        timeout=15,
                     )
                 except subprocess.TimeoutExpired:
                     # Chrome can keep an event-loop page alive after writing the

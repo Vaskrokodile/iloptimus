@@ -40,11 +40,8 @@ from .core import (
     run_pipeline_subprocess,
 )
 from .core.dataset_tools import (
-    assemble_dataset,
-    audit_feature_coverage,
     create_dataset_workspace,
-    expand_dataset,
-    filter_dataset,
+    curate_dataset,
     load_filtered_dataset,
     load_source_bundle,
     save_source_bundle,
@@ -60,6 +57,14 @@ from .core.environments import (
     get_environment,
     list_environments,
     save_environment,
+)
+from .core.failure_memory import (
+    build_failure_skill,
+    list_failure_skills,
+    mark_skill_use,
+    retrieve_failure_skills,
+    save_failure_skill,
+    skill_guardrails,
 )
 from .core.inference import (
     ModelHandle,
@@ -99,11 +104,10 @@ from .core.test_time_compute import (
     audit_research_subtask,
     derive_artifact_contract,
     evaluate_artifact,
+    fast_research_queries,
     framework_artifact_source,
     github_repository_search_terms,
     github_repository_url,
-    parse_model_queries,
-    research_queries,
     research_subtasks,
     sample_repository,
     source_capabilities,
@@ -126,6 +130,11 @@ from .core.tools import (
     tools_public,
     web_fetch,
     web_search,
+)
+from .core.training_performance import (
+    load_training_seconds_per_iteration,
+    record_training_throughput,
+    training_profile_key,
 )
 
 
@@ -440,40 +449,6 @@ def create_app() -> FastAPI:
             await _run_in_executor(release_memory)
         return result
 
-    async def _model_research_plan(
-        model_info,
-        precision: str,
-        source: str,
-        query: str,
-        contract,
-        diagnostics: list[str],
-    ) -> list[str]:
-        """Let the failing local model author the tool queries; constrain only their envelope."""
-        from .core.inference import release_memory
-
-        fallback = research_queries(query, contract)
-        prompt = (
-            "Your artifact attempt failed objective verification. Plan web research before retrying. "
-            "Return ONLY a JSON array of 4 to 6 concise search queries. Cover official documentation, "
-            "permissively licensed repositories, implementation examples, performance, and the failed checks.\n"
-            f"Task: {strip_learning_command(query)}\n"
-            f"Failed checks: {json.dumps(diagnostics[:10], ensure_ascii=False)}\n"
-            f"Requested capabilities: {json.dumps(contract.requested_features)}"
-        )
-        async with _chat_model_lock:
-            _chat_models.clear()
-            await _run_in_executor(release_memory)
-            handle = await _run_in_executor(
-                load_model,
-                model_info.huggingface_id,
-                precision,
-                source_override=source,
-            )
-            result = await _run_in_executor(run_completion, handle, prompt, 512, 0.1)
-            del handle
-            await _run_in_executor(release_memory)
-        return parse_model_queries(result.answer or result.text, fallback)
-
     async def _collect_ttc_sources(
         session_id: str,
         queries: list[str],
@@ -569,35 +544,42 @@ def create_app() -> FastAPI:
                 and not item.get("archived")
             ]
 
-        github_api_calls = 0
-        for index, search_query in enumerate(queries):
+        search_semaphore = asyncio.Semaphore(8)
+        fetch_semaphore = asyncio.Semaphore(12)
+
+        async def run_search(index: int, search_query: str):
             learning.emit(
                 session_id,
                 "tool-search",
-                f"Local model called web_search: {search_query}",
-                0.25 + 0.02 * index,
+                f"Automated evidence search: {search_query}",
+                0.25 + 0.08 * index / max(1, len(queries)),
                 tool="web_search",
                 query=search_query,
             )
             try:
-                search = await web_search(search_query)
+                async with search_semaphore:
+                    search = await web_search(search_query)
             except Exception as error:
-                rejected.append({"url": "", "reason": str(error), "query": search_query})
-                search = {"results": []}
-            if (
-                any(
-                    marker in search_query.lower()
-                    for marker in ("github", "repository", "source code", "permissive license")
-                )
-                and len(repo_urls) < 6
-                and github_api_calls < 3
+                return index, search_query, {"results": []}, str(error), []
+            github_rows: list[str] = []
+            if index < 3 and any(
+                marker in search_query.lower()
+                for marker in ("github", "repository", "source code", "permissive license")
             ):
-                github_api_calls += 1
-                for repository_url in await github_repository_search(search_query):
-                    if repository_url not in repo_urls:
-                        repo_urls.append(repository_url)
-            rows = search.get("results", [])[:8]
-            for row in rows:
+                github_rows = await github_repository_search(search_query)
+            return index, search_query, search, "", github_rows
+
+        search_results = await asyncio.gather(
+            *(run_search(index, query) for index, query in enumerate(queries))
+        )
+        document_rows: list[dict[str, Any]] = []
+        for _, search_query, search, error, github_rows in search_results:
+            if error:
+                rejected.append({"url": "", "reason": error, "query": search_query})
+            for repository_url in github_rows:
+                if repository_url not in repo_urls:
+                    repo_urls.append(repository_url)
+            for row in search.get("results", [])[:8]:
                 url = str(row.get("url") or "")
                 repository = github_repository_url(url)
                 if repository and repository not in repo_urls:
@@ -609,39 +591,50 @@ def create_app() -> FastAPI:
                 if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
-                try:
+                document_rows.append(row)
+
+        async def fetch_document(row: dict[str, Any]):
+            url = str(row.get("url") or "")
+            try:
+                async with fetch_semaphore:
                     fetched = await web_fetch(url)
-                except Exception as error:
-                    rejected.append({"url": url, "reason": str(error)})
-                    continue
-                text = str(fetched.get("text") or row.get("snippet") or "").strip()
-                if len(text) < 180:
-                    rejected.append({"url": url, "reason": "Source contained too little readable text"})
-                    continue
-                relevance_haystack = re.sub(
-                    r"[^a-z0-9]+", "", f"{row.get('title', '')} {row.get('url', '')} {text[:4000]}".lower()
-                )
-                matched_terms = {term for term in relevance_terms if term in relevance_haystack}
-                if len(matched_terms) < min(2, len(relevance_terms)):
-                    rejected.append({"url": url, "reason": "Source failed task-capability relevance threshold"})
-                    continue
-                sources.append(
-                    {
-                        "title": str(row.get("title") or url),
-                        "url": str(fetched.get("url") or url),
-                        "text": text[:40_000],
-                        "license": "documentation",
-                        "kind": "web-documentation",
-                    }
-                )
-        for repository_url in repo_urls[:6]:
-            corpus = await asyncio.to_thread(
+            except Exception as error:
+                return None, {"url": url, "reason": str(error)}
+            text = str(fetched.get("text") or row.get("snippet") or "").strip()
+            if len(text) < 180:
+                return None, {"url": url, "reason": "Source contained too little readable text"}
+            relevance_haystack = re.sub(
+                r"[^a-z0-9]+", "", f"{row.get('title', '')} {row.get('url', '')} {text[:4000]}".lower()
+            )
+            matched_terms = {term for term in relevance_terms if term in relevance_haystack}
+            if len(matched_terms) < min(2, len(relevance_terms)):
+                return None, {"url": url, "reason": "Source failed task-capability relevance threshold"}
+            return {
+                "title": str(row.get("title") or url),
+                "url": str(fetched.get("url") or url),
+                "text": text[:40_000],
+                "license": "documentation",
+                "kind": "web-documentation",
+            }, None
+
+        fetched_rows = await asyncio.gather(*(fetch_document(row) for row in document_rows))
+        for fetched, refusal in fetched_rows:
+            if fetched:
+                sources.append(fetched)
+            if refusal:
+                rejected.append(refusal)
+
+        async def scrape_repository(repository_url: str):
+            return await asyncio.to_thread(
                 sample_repository,
                 repository_url,
                 task,
                 max_files=12,
                 preferred_features=tuple(sorted(relevance_terms)),
             )
+
+        corpora = await asyncio.gather(*(scrape_repository(url) for url in repo_urls[:6]))
+        for corpus in corpora:
             sources.extend(corpus.sources)
             rejected.extend(corpus.rejected)
         # Hash-level de-duplication keeps prolific mirrors from dominating.
@@ -665,6 +658,7 @@ def create_app() -> FastAPI:
         if not session:
             return
         try:
+            phase_timings: dict[str, float] = {}
             query = strip_learning_command(session.query)
             contract = derive_artifact_contract(query)
             session.task_type = "artifact"
@@ -681,8 +675,23 @@ def create_app() -> FastAPI:
             if not source:
                 raise RuntimeError("Download the selected model before running test-time adaptation")
 
-            generation_prompt = artifact_generation_prompt(query, contract)
+            retrieved_skills = retrieve_failure_skills(
+                artifact_kind=contract.artifact_kind,
+                features=contract.requested_features,
+            )
+            session.retrieved_skill_ids = [str(item["id"]) for item in retrieved_skills]
+            guardrails = skill_guardrails(retrieved_skills)
+            if retrieved_skills:
+                learning.emit(
+                    session_id,
+                    "skill-retrieval",
+                    f"Retrieved {len(retrieved_skills)} verifier-derived failure skills",
+                    0.05,
+                    skill_ids=session.retrieved_skill_ids,
+                )
+            generation_prompt = artifact_generation_prompt(query, contract, skill_guardrails=guardrails)
             baseline_path = root / "baseline" / contract.entrypoint
+            baseline_started = time.perf_counter()
             learning.emit(session_id, "baseline-generation", "Generating the unadapted holdout artifact", 0.08)
             baseline_result = await _generate_ttc_artifact(
                 model_info,
@@ -699,8 +708,12 @@ def create_app() -> FastAPI:
                 0.16,
             )
             baseline = await asyncio.to_thread(evaluate_artifact, baseline_path, contract)
+            phase_timings["baseline_generation_and_verification_seconds"] = round(
+                time.perf_counter() - baseline_started, 3
+            )
             session.baseline_evaluation = baseline.public()
             if baseline.passed:
+                mark_skill_use(session.retrieved_skill_ids, successful=True)
                 learning.complete(
                     session_id,
                     f"The baseline already passed every objective gate (score {baseline.score:.3f}); no weight update was justified. "
@@ -709,6 +722,7 @@ def create_app() -> FastAPI:
                 return
 
             failed_checks = baseline.diagnostics or [key for key, value in baseline.hard_gates.items() if not value]
+            research_started = time.perf_counter()
             learning.emit(
                 session_id,
                 "failure-detected",
@@ -716,20 +730,28 @@ def create_app() -> FastAPI:
                 0.21,
                 evaluation=baseline.public(),
             )
-            model_queries = await _model_research_plan(model_info, precision, source, query, contract, failed_checks)
             subtasks = research_subtasks(query, contract)
-            queries = list(dict.fromkeys(model_queries + [item for task in subtasks for item in task.queries]))
+            queries = fast_research_queries(contract, failed_checks)
             session.search_queries = queries
             learning.emit(
                 session_id,
                 "research-planning",
-                f"Created {len(subtasks)} audited subtasks with {len(queries)} distinct tool queries",
+                f"Created {len(subtasks)} audited subtasks with {len(queries)} automated evidence queries",
                 0.24,
             )
             sources: list[dict[str, str]] = []
             rejected: list[dict[str, str]] = []
-            research_cache_id = "research-" + hashlib.sha256(query.encode()).hexdigest()[:16]
+            cache_signature = json.dumps(
+                {"artifact_kind": contract.artifact_kind, "features": sorted(contract.requested_features)},
+                sort_keys=True,
+            )
+            research_cache_id = "research-v2-" + hashlib.sha256(cache_signature.encode()).hexdigest()[:16]
             cached_sources = load_source_bundle(research_cache_id)
+            legacy_cache_id = "research-" + hashlib.sha256(query.encode()).hexdigest()[:16]
+            if not cached_sources:
+                cached_sources = load_source_bundle(legacy_cache_id)
+                if cached_sources:
+                    save_source_bundle(research_cache_id, cached_sources)
             if cached_sources:
                 sources = cached_sources
                 learning.emit(
@@ -807,6 +829,7 @@ def create_app() -> FastAPI:
                 raise RuntimeError(
                     "Research coverage remained incomplete after a second pass: " + ", ".join(failed_subtasks)
                 )
+            phase_timings["research_and_audit_seconds"] = round(time.perf_counter() - research_started, 3)
             curated_sources = [source for source in sources if source_capabilities(source, contract)]
             coverage = {
                 feature: sum(feature in source_capabilities(source, contract) for source in curated_sources)
@@ -820,22 +843,28 @@ def create_app() -> FastAPI:
             ]
             workspace = create_dataset_workspace(session.id)
             save_source_bundle(session.id, curated_sources)
-            assembly = assemble_dataset(
+            failed_features = [
+                feature
+                for feature, score in baseline.feature_scores.items()
+                if score < 0.5
+            ]
+            curation = curate_dataset(
                 session.id,
                 task=query,
                 artifact_kind=contract.artifact_kind,
                 requested_features=list(contract.requested_features),
-                target_examples=144,
-            )
-            expand_dataset(session.id, target_examples=192)
-            dataset_audit = filter_dataset(
-                session.id,
-                holdout_task=query,
+                priority_features=failed_features,
+                assembled_examples=144,
+                expanded_examples=192,
+                chunk_chars=1_400 if contract.artifact_kind in {"web", "code"} else 2_400,
                 minimum_response_chars=1_000 if contract.artifact_kind in {"web", "code"} else 220,
                 maximum_rows=80 if hw.ram_gb <= 8 else 192,
             )
+            assembly = curation["assembly"]
+            dataset_audit = curation["filtering"]
             filtered = load_filtered_dataset(session.id)
-            feature_audit = audit_feature_coverage(filtered, contract.requested_features)
+            feature_audit = curation["feature_coverage"]
+            phase_timings["automated_curation_seconds"] = round(float(curation["elapsed_ms"]) / 1_000, 3)
             if not feature_audit["passed"]:
                 missing = ", ".join(feature_audit["missing_features"])
                 raise RuntimeError(
@@ -852,6 +881,18 @@ def create_app() -> FastAPI:
                 }
             ] + [{**row, "split": "train"} for row in filtered]
             train_count = len(filtered)
+            compact_profile = hw.ram_gb <= 8 and model_info.params_b <= 2
+            expected_sequence = 256 if hw.ram_gb <= 8 else 512 if hw.ram_gb < 16 else 768
+            expected_rank = 16 if compact_profile or (model_info.params_b <= 3 and hw.ram_gb >= 16) else 8
+            expected_layers = 8 if compact_profile else 16 if model_info.params_b <= 3 and hw.ram_gb >= 16 else 8
+            throughput_key = training_profile_key(
+                model_info.id,
+                sequence_length=expected_sequence,
+                rank=expected_rank,
+                layers=expected_layers,
+                backend=hw.recommended_backend,
+            )
+            measured_step_time = load_training_seconds_per_iteration(throughput_key)
             decision = select_ttc_method(
                 contract=contract,
                 training_available=hw.recommended_backend == "mlx",
@@ -861,6 +902,9 @@ def create_app() -> FastAPI:
                 memory_gb=hw.ram_gb,
                 quantized=precision == "int4",
                 maximum_training_seconds=600,
+                backend=hw.recommended_backend,
+                paged_optimizer_available=False,
+                measured_seconds_per_iteration=measured_step_time,
             )
             session.method = decision.method
             session.method_decision = decision.public()
@@ -877,6 +921,7 @@ def create_app() -> FastAPI:
                 "dataset_feature_coverage": feature_audit,
                 "dataset_assembly": assembly,
                 "dataset_audit": dataset_audit,
+                "automated_curation": curation,
                 "method_decision": decision.public(),
                 "baseline_evaluation": baseline.public(),
             }
@@ -890,7 +935,7 @@ def create_app() -> FastAPI:
                 0.48,
                 method=decision.public(),
             )
-            if decision.method not in {"qlora-il", "lora-il"}:
+            if decision.method not in {"qlora-il", "pqlora-il", "lora-il"}:
                 raise RuntimeError("The corpus was insufficient for a defensible local weight update")
 
             environment = save_environment(
@@ -960,7 +1005,7 @@ def create_app() -> FastAPI:
             learning.emit(
                 session_id,
                 "training",
-                f"Selected QLoRA-IL ({iterations} iterations); RL was rejected because this one-shot task lacks a stable rollout process",
+                f"Selected {decision.method} ({iterations} iterations); RL was rejected because this one-shot task lacks a stable rollout process",
                 0.54,
                 run_id=run.id,
             )
@@ -969,6 +1014,18 @@ def create_app() -> FastAPI:
             if not completed or completed.status != "completed":
                 detail = completed.events[-1]["message"] if completed and completed.events else "Training failed"
                 raise RuntimeError(detail)
+
+            training_reports = [
+                event.get("data", {})
+                for event in completed.events
+                if event.get("stage") == "sft-training"
+                and float(event.get("data", {}).get("iterations_per_second") or 0.0) > 0
+            ]
+            throughput_profile = record_training_throughput(
+                throughput_key,
+                training_reports,
+                run_id=run.id,
+            )
 
             adapter_path = run_dir(run.id) / "adapters" / "sft"
             adapted_path = root / "adapted" / contract.entrypoint
@@ -999,6 +1056,23 @@ def create_app() -> FastAPI:
                     framework_evaluation = await asyncio.to_thread(evaluate_artifact, framework_path, contract)
                     session.framework_artifact_path = str(framework_path)
                     session.framework_evaluation = framework_evaluation.public()
+            generated_skill = build_failure_skill(
+                session_id=session.id,
+                contract=contract.public(),
+                baseline=baseline.public(),
+                adapted=adapted.public(),
+            )
+            saved_skill = save_failure_skill(generated_skill)
+            session.generated_skill_path = str(saved_skill["path"])
+            mark_skill_use(session.retrieved_skill_ids, successful=bool(acceptance["accepted"]))
+            learning.emit(
+                session_id,
+                "skill-memory",
+                "Stored a validated verifier-derived failure skill for future matching tasks",
+                0.965,
+                skill_id=saved_skill["id"],
+                evidence_status=saved_skill["evidence_status"],
+            )
             decision_path = root / "acceptance.json"
             decision_path.write_text(json.dumps(acceptance, indent=2) + "\n", encoding="utf-8")
             experiment_path = root / "experiment.json"
@@ -1029,6 +1103,7 @@ def create_app() -> FastAPI:
                             "sft_loss_history": completed.sft_loss_history,
                             "baseline_accuracy": completed.baseline_accuracy,
                             "post_sft_accuracy": completed.post_sft_accuracy,
+                            "throughput_profile": throughput_profile or {},
                         },
                         "artifact_sha256": {
                             "baseline": hashlib.sha256(baseline_path.read_bytes()).hexdigest(),
@@ -1038,6 +1113,9 @@ def create_app() -> FastAPI:
                         "adapted_evaluation": adapted.public(),
                         "framework_artifact_path": str(framework_path) if framework_path else "",
                         "framework_evaluation": framework_evaluation.public() if framework_evaluation else {},
+                        "failure_skill": saved_skill,
+                        "retrieved_skill_ids": session.retrieved_skill_ids,
+                        "phase_timings": phase_timings,
                         "acceptance": acceptance,
                     },
                     indent=2,
@@ -1764,7 +1842,7 @@ def create_app() -> FastAPI:
             session.contract = derive_artifact_contract(strip_learning_command(req.message)).public()
             asyncio.create_task(run_artifact_ttc_session(session.id))
             return {
-                "answer": "I’m running a measured test-time-compute cycle: generate an unadapted artifact, execute it, let the local model plan web searches if it fails, build a licensed holdout-safe corpus, select an adaptation method, train, retry, and accept only measured improvement.",
+                "answer": "I’m running a measured test-time-compute cycle: retrieve verified failure skills, generate and execute a baseline, run automated evidence gathering and curation if it fails, select an honest hardware-aware adaptation method, train, retry, and accept only measured improvement.",
                 "reasoning": "",
                 "tokens_per_sec": 0.0,
                 "model_id": req.model_id,
@@ -2164,6 +2242,10 @@ def create_app() -> FastAPI:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.get("/api/learning-skills")
+    async def get_failure_skills():
+        return {"skills": [skill.public() for skill in list_failure_skills()]}
 
     @app.get("/api/learning/{session_id}")
     async def get_learning_session(session_id: str):

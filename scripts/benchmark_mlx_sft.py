@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--compile-bucket", type=int, default=128)
     parser.add_argument("--cache-threshold-gb", type=float, default=1.0)
+    parser.add_argument("--legacy-bucket-rounding", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--lora-scale", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -84,6 +85,7 @@ def main() -> None:
                 batch_size=arguments.batch_size,
                 compile_bucket_size=arguments.compile_bucket,
                 clear_cache_threshold_gb=arguments.cache_threshold_gb,
+                preserve_native_bucket_shape=not arguments.legacy_bucket_rounding,
                 optimizer="adamw",
                 mask_prompt=True,
                 seed=arguments.seed,
@@ -111,12 +113,16 @@ def main() -> None:
                 "batch_size": arguments.batch_size,
                 "compile_bucket": arguments.compile_bucket,
                 "cache_threshold_gb": arguments.cache_threshold_gb,
+                "preserve_native_bucket_shape": not arguments.legacy_bucket_rounding,
                 "learning_rate": arguments.learning_rate,
                 "lora_scale": arguments.lora_scale,
                 "seed": arguments.seed,
                 "elapsed_seconds_including_load": round(elapsed, 3),
                 "reported_losses": losses,
                 "trainable_parameters": adapter_config.get("trainable_parameters", 0),
+                "mean_iterations_per_second": adapter_config.get("mean_iterations_per_second", 0),
+                "mean_tokens_per_second": adapter_config.get("mean_tokens_per_second", 0),
+                "trained_tokens": adapter_config.get("trained_tokens", 0),
             },
             indent=2,
         )

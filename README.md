@@ -46,12 +46,15 @@ Then open `http://127.0.0.1:7860` in your browser.
    the prompt, while public-web and configured MCP tools run through an audited
    execution boundary
 8. **Run measured test-time compute** — `/ttc <artifact task>` generates and
-   executes an unadapted baseline, lets the failing local model research through
-   audited web tools, builds a licensed provenance-tracked corpus, selects a
+   executes an unadapted baseline, gathers audited evidence through a bounded
+   automated search frontier, builds a licensed provenance-tracked corpus, selects a
    defensible adaptation method, retries, and rejects adapters that do not pass
    every objective gate. Rejected small-model artifact runs can expose a
    separately labeled, browser-verified framework fallback without pretending
    the adapter succeeded. See [the TTC design and current experiment](docs/test-time-compute.md).
+9. **Remember verified failures** — objective artifact failures become compact,
+   validated repair skills. Matching future tasks retrieve them, while only a
+   later passing model artifact can promote their success count.
 
 ## Local Agent Skills and Tools
 
@@ -127,8 +130,10 @@ All user-created data is kept outside the installed package under
 ├── models/          downloaded Hugging Face / MLX snapshots
 ├── environments/    no-code IL and RL specifications and generated tasksets
 ├── runs/<run-id>/   config, event log, metrics, traces, and LoRA adapters
+├── skill-memory/    verifier-derived repair skills and cumulative evidence
 ├── mcp.json         explicit MCP server configuration (off by default)
 ├── performance.json local TPS calibration samples
+├── training-performance.json measured optimizer-step profiles
 └── tool_calls.jsonl append-only tool audit log
 ```
 
@@ -222,6 +227,7 @@ uv run iloptimus version            # Print version
 | GET | `/api/skills` | Packaged read-only prompt skills |
 | GET | `/api/tools` | Built-in tools and configured MCP servers |
 | POST | `/api/chat` | Chat with a downloaded local model |
+| GET | `/api/learning-skills` | Inspect verifier-derived failure-skill memory |
 | GET | `/api/learning/{id}` | Inspect persistent research/training/TTC state |
 | GET | `/api/learning/{id}/events` | Stream subtask audits and adaptation progress |
 | GET | `/api/learning/{id}/artifact/{variant}` | Open baseline, adapted, or verified framework artifacts/screenshots |

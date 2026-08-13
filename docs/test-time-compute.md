@@ -162,3 +162,93 @@ and remained the usable result. This replication demonstrates that longer
 training units improved the small model's output structure and measured score,
 but did not make this 1.5B model independently solve the full production
 artifact contract.
+
+## Automated curation and failure memory
+
+The next pipeline revision removes the local-model research-planning inference
+from artifact TTC. Observable verifier failures and capability contracts now
+produce a bounded deterministic search frontier. Searches, safe page fetches,
+and licensed repository sampling run concurrently. Evidence is cached by the
+artifact kind and capability signature rather than exact prompt wording, so a
+new phrasing of the same capability request reuses the audited corpus.
+
+`curate_dataset` runs syntax-aware assembly, deterministic expansion, mechanical
+code-quality scoring, holdout decontamination, exact/near deduplication,
+source/origin balancing, and post-filter capability audits in one call. It
+prioritizes baseline failures and reserves rare capability units before generic
+origin quotas. On the Sakura cache, the full curation stage completed in about
+0.45 seconds without model inference. An early 1,400-character experiment
+correctly stopped because island coverage fell to three rows; rare-first
+reservation repaired it to 11 rows from five files and three origins while all
+eight capability audits passed.
+
+Failed verifier results also compile into constrained Markdown skills under
+`~/.iloptimus/skill-memory/`. These lessons contain the objective diagnostics,
+anti-patterns, and mechanical completion gates. They are schema validated,
+retrieved only for matching artifact kinds/features, and injected under a
+strict character budget. A lesson records a successful use only when a later
+model artifact passes; a trusted fallback never promotes it. This is a
+retrieval memory of verified failure patterns, not a promise that a mistake can
+never recur.
+
+## MLX native-shape throughput
+
+`mlx-lm` pads batches to shapes of `1 + N × 32`. The previous wrapper rounded
+those already-aligned shapes a second time—for example, 225 tokens became 256—
+which added up to 31 useless tokens per short example. Preserving the native
+sentinel shape produced the following paired 48-update M1 benchmark with the
+same model, seed, optimizer, LoRA configuration, and effective tokens:
+
+- old rounding: 2.3925 updates/s, 38.2803 training tokens/s, 21.783 seconds,
+  1.194 GB peak;
+- native shape: 5.0111 updates/s, 80.1782 training tokens/s, 11.558 seconds,
+  1.117 GB peak.
+
+That is a measured 2.09× update/token throughput improvement on short examples.
+It does not double workloads already truncated at the 256-token cap. Batch two
+and a four-layer Q/V-only adapter were separately measured and rejected because
+they did not improve this machine's useful throughput/quality tradeoff.
+
+Training events now expose updates/s, training tokens/s, trained tokens, and
+memory. Sustained local rates are persisted by model/sequence/rank/layer/backend
+profile. Future schedules use the conservative measured step time so thermal or
+system slowdown reduces the selected update count instead of violating the
+declared time budget.
+
+Paged QLoRA is selected only when a CUDA training backend exposes a real paged
+optimizer. MLX uses unified-memory QLoRA; relabeling it PQLoRA would not change
+the optimizer or make training faster.
+
+## Exact post-automation replication
+
+Session `7b57fa2139bf`, training run `6cc4146f4600`, reran the untouched Sakura
+request after automated curation, rare-capability reservation, failure-skill
+retrieval, and native-shape batching were installed. It reused 118 audited
+evidence objects by capability signature. Deterministic research/audit took
+0.465 seconds and the one-call curator took 0.457 seconds without another model
+inference. The curator retained 79 rows from 41 files and nine origins with a
+0.9318 mean quality score and zero holdout contamination. All eight capability
+audits passed; the rare island class retained 11 rows from five files and three
+origins.
+
+The M1 training run completed 310 optimizer updates and 63,562 effective
+training tokens at 1.666 GB peak MLX memory. Heavy concurrent system load made
+the run take 1,082.3 seconds, proving the previous static estimate was unsafe.
+The sustained profile now records a conservative 4.6244 seconds/update for this
+exact model/sequence/rank/layer/backend tuple. Under the same ten-minute budget,
+the next selector chooses 124 updates (598 seconds estimated) instead of 310.
+
+The independent baseline scored 0.4935. The adapted artifact scored 0.4653, a
+-0.0282 regression: it learned observable shader and island patterns but still
+failed source depth, syntax, source-as-text, voxel, animation, and interaction
+gates. The adapter was correctly rejected. The separately labeled trusted
+framework scored 0.9263 and passed every hard gate, including a real nonblank
+Chromium render. This is a useful negative result: high-quality data and more
+updates are not sufficient evidence that this 1.5B model can synthesize the
+entire production artifact in one pass.
+
+The failed retry created a new verifier-derived repair skill and the run also
+consumed the prior matching failure skill. Partial feature scores now become
+completion rules too, and repeated observations for the same repair signature
+are retained in `evidence.json` rather than overwriting history. Failed uses do
+not increase the skill's success count.

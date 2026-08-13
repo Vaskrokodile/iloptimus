@@ -24,6 +24,9 @@ class SFTMetrics:
     learning_rate: float
     elapsed: float
     peak_memory_gb: float
+    iterations_per_second: float = 0.0
+    tokens_per_second: float = 0.0
+    trained_tokens: int = 0
 
 
 @dataclass
@@ -55,6 +58,7 @@ class SFTConfig:
     # buffers safely, so retain a bounded allocator cache for throughput.
     clear_cache_threshold_gb: float = 1.0
     compile_bucket_size: int = 128
+    preserve_native_bucket_shape: bool = True
     seed: int = 0
 
 
@@ -284,12 +288,20 @@ def run_sft(
 
     os.makedirs(adapter_path, exist_ok=True)
     adapter_file = os.path.join(adapter_path, "adapters.safetensors")
+    throughput_reports: list[tuple[float, float, int]] = []
 
     class MetricsCallback(TrainingCallback):
         def __init__(self) -> None:
             self.started = time.perf_counter()
 
         def on_train_loss_report(self, info: dict) -> None:
+            throughput_reports.append(
+                (
+                    float(info.get("iterations_per_second") or 0.0),
+                    float(info.get("tokens_per_second") or 0.0),
+                    int(info.get("trained_tokens") or 0),
+                )
+            )
             if not on_metrics:
                 return
             on_metrics(
@@ -299,6 +311,9 @@ def run_sft(
                     learning_rate=float(info["learning_rate"]),
                     elapsed=time.perf_counter() - self.started,
                     peak_memory_gb=float(info["peak_memory"]),
+                    iterations_per_second=float(info.get("iterations_per_second") or 0.0),
+                    tokens_per_second=float(info.get("tokens_per_second") or 0.0),
+                    trained_tokens=int(info.get("trained_tokens") or 0),
                 )
             )
 
@@ -328,7 +343,13 @@ def run_sft(
         maximum = int(kwargs.get("max_seq_length") or config.max_seq_length)
         for batch, lengths in iterate_batches(*args, **kwargs):
             current = int(batch.shape[1])
-            target = min(maximum, ((current + bucket - 1) // bucket) * bucket)
+            # mlx-lm emits ``1 + N * 32`` shapes. Preserve that sentinel
+            # shape instead of padding it by another 31 tokens at bucket 32.
+            target = (
+                min(maximum, 1 + ((max(0, current - 1) + bucket - 1) // bucket) * bucket)
+                if config.preserve_native_bucket_shape
+                else min(maximum, ((current + bucket - 1) // bucket) * bucket)
+            )
             if current < target:
                 batch = mx.pad(batch, ((0, 0), (0, target - current)))
             yield batch, lengths
@@ -359,8 +380,16 @@ def run_sft(
         "max_seq_length": config.max_seq_length,
         "compile_bucket_size": config.compile_bucket_size,
         "clear_cache_threshold_gb": config.clear_cache_threshold_gb,
+        "preserve_native_bucket_shape": config.preserve_native_bucket_shape,
         "trainable_parameters": trainable_parameters,
         "seed": config.seed,
+        "mean_iterations_per_second": round(
+            sum(item[0] for item in throughput_reports) / max(1, len(throughput_reports)), 4
+        ),
+        "mean_tokens_per_second": round(
+            sum(item[1] for item in throughput_reports) / max(1, len(throughput_reports)), 4
+        ),
+        "trained_tokens": max((item[2] for item in throughput_reports), default=0),
     }
     with open(f"{adapter_path}/adapter_config.json", "w") as f:
         json.dump(cfg, f, indent=4)
