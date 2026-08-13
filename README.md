@@ -49,7 +49,9 @@ Then open `http://127.0.0.1:7860` in your browser.
    executes an unadapted baseline, lets the failing local model research through
    audited web tools, builds a licensed provenance-tracked corpus, selects a
    defensible adaptation method, retries, and rejects adapters that do not pass
-   every objective gate. See [the TTC design and current experiment](docs/test-time-compute.md).
+   every objective gate. Rejected small-model artifact runs can expose a
+   separately labeled, browser-verified framework fallback without pretending
+   the adapter succeeded. See [the TTC design and current experiment](docs/test-time-compute.md).
 
 ## Local Agent Skills and Tools
 
@@ -220,6 +222,9 @@ uv run iloptimus version            # Print version
 | GET | `/api/skills` | Packaged read-only prompt skills |
 | GET | `/api/tools` | Built-in tools and configured MCP servers |
 | POST | `/api/chat` | Chat with a downloaded local model |
+| GET | `/api/learning/{id}` | Inspect persistent research/training/TTC state |
+| GET | `/api/learning/{id}/events` | Stream subtask audits and adaptation progress |
+| GET | `/api/learning/{id}/artifact/{variant}` | Open baseline, adapted, or verified framework artifacts/screenshots |
 | GET/POST | `/api/environments` | List or create no-code IL/RL environments |
 | POST | `/api/environments/from-chat` | Generate an environment with `/il` or `/rl` |
 | POST | `/api/runs` | Start a persisted local training run |
@@ -229,8 +234,10 @@ uv run iloptimus version            # Print version
 
 ## Backends
 
-- **MLX** (Apple Silicon) — uses `mlx_lm` for inference and LoRA
-  fine-tuning. **This is the only backend currently implemented.**
+- **MLX** (Apple Silicon) — uses `mlx_lm` for inference and compiled
+  LoRA/QLoRA fine-tuning with cached tokenization, stable length buckets,
+  prompt masking, selected attention targets, and hardware-budgeted steps.
+  **This is the only backend currently implemented.**
   Recommended for M-series Macs with unified memory.
 - **CUDA / CPU** — hardware is detected and reported, but release 0.2 refuses
   to claim model download or training support on these backends. They remain a

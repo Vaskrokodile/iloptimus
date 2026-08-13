@@ -61,6 +61,23 @@ class RunConfig:
     sft_lr: float = 1e-3  # SGD with higher LR for visible changes
     sft_task_offset: int = 0
     sft_tasks: int | None = None
+    sft_batch_size: int = 1
+    sft_grad_accumulation_steps: int = 1
+    sft_lora_rank: int = 8
+    sft_lora_layers: int = 8
+    sft_lora_scale: float = 20.0
+    sft_lora_targets: tuple[str, ...] = (
+        "self_attn.q_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+    )
+    sft_optimizer: str = "adamw"
+    sft_mask_prompt: bool = True
+    sft_grad_checkpoint: bool = False
+    sft_memory_limit_gb: float = 3.0
+    sft_compile_bucket_size: int = 128
+    sft_clear_cache_threshold_gb: float = 1.0
+    sft_seed: int = 0
     grpo_iters: int = 10  # reduced from 50 — research shows diminishing returns after 10-20 iters
     grpo_group_size: int = 2  # reduced from 4 — 2-GRPO matches 16-GRPO per recent research
     grpo_lr: float = 1e-3  # SGD with higher LR for visible changes
@@ -111,6 +128,7 @@ class RunState:
             if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
                 return 0.0
             return v
+
         return {
             "id": self.id,
             "status": self.status,
@@ -134,10 +152,7 @@ class RunState:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "RunState":
-        fields = {
-            key: value for key, value in payload.items()
-            if key in cls.__dataclass_fields__ and key != "config"
-        }
+        fields = {key: value for key, value in payload.items() if key in cls.__dataclass_fields__ and key != "config"}
         return cls(config=RunConfig(**payload["config"]), **fields)
 
 
@@ -153,12 +168,14 @@ def _load_saved_runs() -> dict[str, RunState]:
             continue
         if state.status in {"pending", "running"}:
             state.status = "failed"
-            state.events.append(LogEvent(
-                timestamp=time.time(),
-                stage=state.stage,
-                level="error",
-                message="Run was interrupted when IL Optimus stopped",
-            ).to_dict())
+            state.events.append(
+                LogEvent(
+                    timestamp=time.time(),
+                    stage=state.stage,
+                    level="error",
+                    message="Run was interrupted when IL Optimus stopped",
+                ).to_dict()
+            )
         saved[state.id] = state
     return saved
 
@@ -341,6 +358,7 @@ async def run_pipeline_subprocess(run_id: str) -> RunState | None:
 # Real pipeline stages
 # ---------------------------------------------------------------------------
 
+
 async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) -> object:
     """Stage 2: Load the model via mlx_lm.
 
@@ -367,7 +385,9 @@ async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) ->
     )
 
     _emit(
-        run_id, "loading-model", "success",
+        run_id,
+        "loading-model",
+        "success",
         f"Model loaded: {model.name} ({config.precision} QLoRA, ~{model.int4_gb if config.precision == 'int4' else model.fp16_gb:.1f}GB)",
     )
     await _update_progress(run_id, 0.1, "loading-model")
@@ -375,7 +395,13 @@ async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) ->
 
 
 async def _benchmark_stage(
-    run_id: str, config: RunConfig, handle, domain: str, phase: str, progress_start: float, progress_end: float,
+    run_id: str,
+    config: RunConfig,
+    handle,
+    domain: str,
+    phase: str,
+    progress_start: float,
+    progress_end: float,
 ) -> tuple[float, list[dict]]:
     """Run a real benchmark: inference + grading on each task.
 
@@ -394,6 +420,7 @@ async def _benchmark_stage(
 
     # Callback for per-task progress (called from the thread pool)
     task_results_seen = []
+
     def on_task_complete(idx, total, result):
         task_results_seen.append(result)
         acc = sum(r.correctness for r in task_results_seen) / len(task_results_seen)
@@ -428,7 +455,9 @@ async def _benchmark_stage(
     ]
 
     _emit(
-        run_id, f"benchmarking-{phase}", "success",
+        run_id,
+        f"benchmarking-{phase}",
+        "success",
         f"[{phase}] Accuracy: {result.accuracy:.1%} | Mean score: {result.mean_score:.3f} | Tokens/s: {result.mean_tokens_per_sec:.1f}",
         accuracy=result.accuracy,
         mean_score=result.mean_score,
@@ -442,10 +471,16 @@ async def _benchmark_stage(
 async def _emit_and_progress(run_id, stage, idx, total, result, acc, p_start, p_end):
     """Emit a benchmark task completion event and update progress."""
     _emit(
-        run_id, stage, "metric",
-        f"Task {idx+1}/{total}: score={result.score:.3f} correctness={result.correctness:.1%} ({result.tokens_per_sec:.0f} tok/s)",
-        task=idx + 1, total=total, score=result.score, correctness=result.correctness,
-        accuracy=acc, tokens_per_sec=result.tokens_per_sec,
+        run_id,
+        stage,
+        "metric",
+        f"Task {idx + 1}/{total}: score={result.score:.3f} correctness={result.correctness:.1%} ({result.tokens_per_sec:.0f} tok/s)",
+        task=idx + 1,
+        total=total,
+        score=result.score,
+        correctness=result.correctness,
+        accuracy=acc,
+        tokens_per_sec=result.tokens_per_sec,
     )
     progress = p_start + (p_end - p_start) * (idx + 1) / total
     await _update_progress(run_id, progress, stage)
@@ -485,10 +520,22 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
     sft_config = SFTConfig(
         learning_rate=config.sft_lr,
         num_iters=config.sft_iters,
-        memory_limit_gb=3.0,  # QLoRA uses less memory (int4 is 1.2GB vs fp16 3.5GB)
-        lora_scale=0.05,  # reduced from 0.1 — less aggressive to avoid model collapse
+        batch_size=config.sft_batch_size,
+        grad_accumulation_steps=config.sft_grad_accumulation_steps,
+        memory_limit_gb=config.sft_memory_limit_gb,
+        lora_rank=config.sft_lora_rank,
+        lora_layers=config.sft_lora_layers,
+        lora_targets=tuple(config.sft_lora_targets),
+        lora_scale=config.sft_lora_scale,
         grad_clip=1.0,
         max_seq_length=config.max_seq_length,
+        optimizer=config.sft_optimizer,
+        mask_prompt=config.sft_mask_prompt,
+        grad_checkpoint=config.sft_grad_checkpoint,
+        compile_bucket_size=config.sft_compile_bucket_size,
+        clear_cache_threshold_gb=config.sft_clear_cache_threshold_gb,
+        seed=config.sft_seed,
+        steps_per_eval=max(1, min(10, config.sft_iters)),
     )
 
     losses: list[float] = []
@@ -517,9 +564,13 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
 
 async def _emit_sft_metrics(run_id, metrics, total):
     _emit(
-        run_id, "sft-training", "metric",
-        f"SFT iter {metrics.iteration+1}/{total}: loss={metrics.loss:.4f} | mem={metrics.peak_memory_gb:.1f}GB",
-        iter=metrics.iteration + 1, total=total, loss=metrics.loss,
+        run_id,
+        "sft-training",
+        "metric",
+        f"SFT iter {metrics.iteration + 1}/{total}: loss={metrics.loss:.4f} | mem={metrics.peak_memory_gb:.1f}GB",
+        iter=metrics.iteration + 1,
+        total=total,
+        loss=metrics.loss,
         peak_memory_gb=metrics.peak_memory_gb,
     )
     progress = 0.2 + 0.25 * (metrics.iteration + 1) / total
@@ -532,7 +583,12 @@ async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapt
     from .grpo import GRPOConfig, GRPOTrainer
 
     _emit(run_id, "grpo-training", "info", f"Starting GRPO RL training ({config.grpo_iters} iterations)...")
-    _emit(run_id, "grpo-training", "info", f"Group size: {config.grpo_group_size} | Temperature: {config.grpo_temperature}")
+    _emit(
+        run_id,
+        "grpo-training",
+        "info",
+        f"Group size: {config.grpo_group_size} | Temperature: {config.grpo_temperature}",
+    )
     await _update_progress(run_id, 0.55, "grpo-training")
 
     loop = asyncio.get_running_loop()
@@ -584,7 +640,9 @@ async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapt
     await _run_in_executor(trainer.save)
 
     _emit(
-        run_id, "grpo-training", "success",
+        run_id,
+        "grpo-training",
+        "success",
         f"GRPO complete. Final reward: {rewards[-1]:.4f} | Peak mem: {rewards and 'N/A'}",
         final_reward=rewards[-1],
     )
@@ -594,11 +652,16 @@ async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapt
 
 async def _emit_grpo_metrics(run_id, metrics, total):
     _emit(
-        run_id, "grpo-training", "metric",
-        f"GRPO iter {metrics.iteration+1}/{total}: reward={metrics.mean_reward:.4f} ± {metrics.std_reward:.4f} | loss={metrics.loss:.4f} | mem={metrics.peak_memory_gb:.1f}GB | {metrics.total_time:.1f}s",
-        iter=metrics.iteration + 1, total=total,
-        reward=metrics.mean_reward, std_reward=metrics.std_reward,
-        loss=metrics.loss, peak_memory_gb=metrics.peak_memory_gb,
+        run_id,
+        "grpo-training",
+        "metric",
+        f"GRPO iter {metrics.iteration + 1}/{total}: reward={metrics.mean_reward:.4f} ± {metrics.std_reward:.4f} | loss={metrics.loss:.4f} | mem={metrics.peak_memory_gb:.1f}GB | {metrics.total_time:.1f}s",
+        iter=metrics.iteration + 1,
+        total=total,
+        reward=metrics.mean_reward,
+        std_reward=metrics.std_reward,
+        loss=metrics.loss,
+        peak_memory_gb=metrics.peak_memory_gb,
         mean_correctness=metrics.mean_correctness,
     )
     progress = 0.55 + 0.30 * (metrics.iteration + 1) / total
@@ -608,6 +671,7 @@ async def _emit_grpo_metrics(run_id, metrics, total):
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
+
 
 async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
     """Main pipeline runner. Streams events via the event queue."""
@@ -653,13 +717,23 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
 
         # ---- Stage 3: Baseline benchmark ----
         baseline_acc, baseline_traces = await _benchmark_stage(
-            run_id, config, handle, domain, "baseline", 0.1, 0.2,
+            run_id,
+            config,
+            handle,
+            domain,
+            "baseline",
+            0.1,
+            0.2,
         )
         state.baseline_accuracy = baseline_acc
         state.baseline_traces = baseline_traces
         state.metrics["baseline_accuracy"] = baseline_acc
-        _emit(run_id, "benchmarking-baseline", "info",
-              f"Captured {len(baseline_traces)} baseline reasoning traces for comparison")
+        _emit(
+            run_id,
+            "benchmarking-baseline",
+            "info",
+            f"Captured {len(baseline_traces)} baseline reasoning traces for comparison",
+        )
 
         # ---- Stage 4: SFT training ----
         sft_losses, sft_adapter_path = await _sft_stage(run_id, config, handle, domain)
@@ -672,15 +746,24 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
             _emit(run_id, "benchmarking-post-sft", "info", "Evaluating the trained in-memory SFT adapter...")
 
         post_sft_acc, post_sft_traces = await _benchmark_stage(
-            run_id, config, handle, domain, "post-sft", 0.45, 0.55,
+            run_id,
+            config,
+            handle,
+            domain,
+            "post-sft",
+            0.45,
+            0.55,
         )
         state.post_sft_accuracy = post_sft_acc
         state.post_sft_traces = post_sft_traces
         improvement = post_sft_acc - baseline_acc
         _emit(
-            run_id, "benchmarking-post-sft", "success",
+            run_id,
+            "benchmarking-post-sft",
+            "success",
             f"Post-SFT accuracy: {post_sft_acc:.1%} ({improvement:+.1%} vs baseline)",
-            accuracy=post_sft_acc, improvement=improvement,
+            accuracy=post_sft_acc,
+            improvement=improvement,
         )
         state.metrics["post_sft_accuracy"] = post_sft_acc
         state.metrics["sft_improvement"] = improvement
@@ -707,24 +790,37 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
             _emit(run_id, "benchmarking-post-grpo", "info", "Evaluating the trained in-memory GRPO adapter...")
 
             post_grpo_acc, post_grpo_traces = await _benchmark_stage(
-                run_id, config, handle, domain, "post-grpo", 0.85, 0.95,
+                run_id,
+                config,
+                handle,
+                domain,
+                "post-grpo",
+                0.85,
+                0.95,
             )
             state.post_grpo_accuracy = post_grpo_acc
             state.post_grpo_traces = post_grpo_traces
             total_improvement = post_grpo_acc - baseline_acc
             _emit(
-                run_id, "benchmarking-post-grpo", "success",
+                run_id,
+                "benchmarking-post-grpo",
+                "success",
                 f"Post-GRPO accuracy: {post_grpo_acc:.1%} ({total_improvement:+.1%} vs baseline)",
-                accuracy=post_grpo_acc, total_improvement=total_improvement,
+                accuracy=post_grpo_acc,
+                total_improvement=total_improvement,
             )
             state.metrics["post_grpo_accuracy"] = post_grpo_acc
             state.metrics["total_improvement"] = total_improvement
 
         # ---- Done ----
         _emit(
-            run_id, "done", "success",
+            run_id,
+            "done",
+            "success",
             f"{pipeline_mode} pipeline complete! {baseline_acc:.1%} -> {post_grpo_acc:.1%} ({total_improvement:+.1%})",
-            baseline=baseline_acc, final=post_grpo_acc, improvement=total_improvement,
+            baseline=baseline_acc,
+            final=post_grpo_acc,
+            improvement=total_improvement,
         )
 
         # Save reasoning traces to a file for before/after comparison
@@ -754,6 +850,7 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         state.status = "failed"
         _emit(run_id, state.stage, "error", f"Pipeline failed: {e}", error=str(e))
         import traceback
+
         _emit(run_id, state.stage, "error", traceback.format_exc())
     finally:
         _persist_state(state)

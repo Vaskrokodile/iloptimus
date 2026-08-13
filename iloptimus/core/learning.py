@@ -131,6 +131,8 @@ class LearningSession:
     baseline_evaluation: dict[str, Any] = field(default_factory=dict)
     adapted_artifact_path: str = ""
     adapted_evaluation: dict[str, Any] = field(default_factory=dict)
+    framework_artifact_path: str = ""
+    framework_evaluation: dict[str, Any] = field(default_factory=dict)
     acceptance: dict[str, Any] = field(default_factory=dict)
     accepted_adapter_path: str = ""
     final_answer: str = ""

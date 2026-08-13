@@ -71,3 +71,26 @@ def test_sft_data_offset_reserves_the_first_custom_task_for_evaluation(monkeypat
 
     assert [example.prompt for example in examples] == ["prompt 1", "prompt 2"]
     assert [example.response for example in examples] == ["training one", "training two"]
+
+
+def test_artifact_sft_uses_source_only_prompt_without_reasoning_wrapper(monkeypatch):
+    environment = {
+        "mode": "IL",
+        "domain": "artifact-building",
+        "tasks": [
+            {
+                "prompt": "Implement an animated ShaderMaterial water surface.",
+                "ideal_response": "const water = new THREE.ShaderMaterial({});",
+            }
+        ],
+    }
+    monkeypatch.setattr("iloptimus.core.sft.get_num_tasks", lambda _domain: 1)
+    monkeypatch.setattr("iloptimus.core.environments.get_environment", lambda _environment_id: environment)
+
+    examples = generate_sft_data(object(), "custom:artifact", num_tasks=1)
+
+    assert examples[0].prompt.startswith(environment["tasks"][0]["prompt"])
+    assert "Return source code only" in examples[0].prompt
+    assert "reasoning tags" in examples[0].prompt
+    assert "<reasoning>" not in examples[0].prompt
+    assert examples[0].response == environment["tasks"][0]["ideal_response"]

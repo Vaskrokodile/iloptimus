@@ -5,11 +5,16 @@ from iloptimus.core.test_time_compute import (
     _png_has_visual_content,
     acceptance_decision,
     artifact_generation_prompt,
+    audit_research_subtask,
     build_artifact_dataset,
     derive_artifact_contract,
     evaluate_artifact,
+    framework_artifact_source,
+    github_repository_search_terms,
     github_repository_url,
     parse_model_queries,
+    rank_repository_paths,
+    research_subtasks,
     select_method,
     task_requires_artifact,
 )
@@ -56,6 +61,11 @@ def test_model_queries_are_bounded_and_fallback_is_available():
     assert "fallback official docs" in parsed
     assert len(parsed) <= 6
     assert parse_model_queries("not json", ["fallback official docs"])
+    rejected_comments = parse_model_queries(
+        "// Now, proceed with implementation\n// documentation is in the source code",
+        ["fallback official docs"],
+    )
+    assert rejected_comments == ["fallback official docs"]
 
 
 def test_repository_urls_are_normalized_without_accepting_lookalikes():
@@ -64,6 +74,26 @@ def test_repository_urls_are_normalized_without_accepting_lookalikes():
     )
     assert github_repository_url("https://github.example/mrdoob/three.js") is None
     assert github_repository_url("https://github.com/mrdoob") is None
+
+
+def test_repository_search_preserves_niche_topic_and_path_ranking_avoids_vendor_code():
+    assert github_repository_search_terms(
+        "sakura three.js voxel shader complete implementation GitHub MIT Apache"
+    ) == ["sakura", "threejs", "voxel"]
+    ranked = rank_repository_paths(
+        [
+            "js/vendor/OrbitControls.js",
+            "js/vendor/three.min.js",
+            "js/main.js",
+            "index.html",
+            "src/tree/petals.js",
+        ],
+        "Three.js falling cherry blossom petals",
+        preferred_features=("three.js", "sakura", "petal"),
+    )
+    assert ranked[:3] == ["src/tree/petals.js", "index.html", "js/main.js"]
+    assert "js/vendor/three.min.js" not in ranked
+    assert ranked.index("js/vendor/OrbitControls.js") > ranked.index("js/main.js")
 
 
 def test_dataset_holds_out_exact_task_and_round_robins_sources():
@@ -133,15 +163,125 @@ def test_verifier_rejects_duplicate_padding_and_stub_comments(tmp_path: Path):
     assert result.feature_scores["voxel"] == 0.0
 
 
+def test_verifier_rejects_source_rendered_as_visible_page_text(tmp_path: Path):
+    contract = derive_artifact_contract("Build a responsive Three.js scene")
+    artifact = tmp_path / "index.html"
+    artifact.write_text(
+        "<html><body>" + "function animate(){ const scene = new THREE.Scene(); document.body.textContent = scene; }\n" * 80
+        + "<script>function valid(){ return true; }</script></body></html>",
+        encoding="utf-8",
+    )
+    result = evaluate_artifact(artifact, contract)
+    assert result.hard_gates["source_not_rendered_as_text"] is False
+    assert "renders source code as page text" in " ".join(result.diagnostics)
+
+
+def test_threejs_framework_is_substantial_and_covers_requested_capabilities(tmp_path: Path):
+    query = "Build a polished voxel Sakura Island in Three.js with shader water and animation"
+    contract = derive_artifact_contract(query)
+    source = framework_artifact_source(query, contract)
+    assert source is not None
+    assert len(source.encode()) >= contract.minimum_bytes
+    assert "new THREE.InstancedMesh" in source
+    assert "new THREE.ShaderMaterial" in source
+    assert "requestAnimationFrame" in source
+    assert "OrbitControls" in source
+    assert "window.addEventListener('resize'" in source
+
+
 def test_method_and_adapter_acceptance_require_evidence_and_improvement():
     contract = derive_artifact_contract("Build an animated Three.js scene")
     no_data = select_method(contract=contract, training_available=True, source_count=1, train_examples=2)
     assert no_data.method == "retrieval"
-    qlora = select_method(contract=contract, training_available=True, source_count=4, train_examples=12)
+    qlora = select_method(
+        contract=contract,
+        training_available=True,
+        source_count=8,
+        train_examples=96,
+        model_params_b=1.5,
+        memory_gb=8,
+    )
     assert qlora.method == "qlora-il"
+    assert qlora.training["iterations"] >= 48
+    assert qlora.training["lora_rank"] == 16
+    assert qlora.training["lora_layers"] == 8
+    assert qlora.training["lora_scale"] == 20.0
+    assert qlora.training["max_seq_length"] == 256
+    assert qlora.training["compile_bucket_size"] == 32
+    assert qlora.training["clear_cache_threshold_gb"] == 1.0
+    assert qlora.training["estimated_training_seconds"] <= 600
+    assert qlora.training["mask_prompt"] is True
+    assert qlora.training["seed"] == 0
+
+    rl = select_method(
+        contract=contract,
+        training_available=True,
+        source_count=8,
+        train_examples=48,
+        multi_step_rollout=True,
+        deterministic_reward=True,
+    )
+    assert rl.method == "qlora-il+grpo"
 
     baseline = evaluate_artifact(Path("/definitely/missing"), contract)
     retry = baseline.__class__(0.9, True, {"exists": True}, {"animation": 1.0}, [], 9000, 200)
     assert acceptance_decision(baseline, retry)["accepted"] is True
     too_close = retry.__class__(0.92, True, {"exists": True}, {"animation": 1.0}, [], 9000, 200)
     assert acceptance_decision(retry, too_close)["accepted"] is False
+
+
+def test_research_subtasks_require_quantity_kind_and_capability_coverage():
+    contract = derive_artifact_contract("Build a Three.js voxel shader scene")
+    subtask = next(item for item in research_subtasks("task", contract) if item.capability == "voxel")
+    sources = [
+        {
+            "url": f"https://source-{index}.test/example",
+            "title": "Voxel implementation",
+            "text": "new THREE.BoxGeometry(); new THREE.InstancedMesh();",
+            "kind": "repository-code" if index else "web-documentation",
+        }
+        for index in range(3)
+    ]
+    audit = audit_research_subtask(subtask, sources)
+    assert audit["passed"] is True
+    assert subtask.status == "completed"
+    incomplete = sources[:1]
+    audit = audit_research_subtask(subtask, incomplete)
+    assert audit["passed"] is False
+    assert "repository-code" in audit["missing_kinds"]
+
+
+def test_niche_research_requires_topical_sources_from_independent_origins():
+    contract = derive_artifact_contract("Build a Three.js Sakura scene")
+    subtask = next(item for item in research_subtasks("task", contract) if item.capability == "sakura")
+    generic_particle_sources = [
+        {
+            "url": f"https://github.com/example/particles/blob/HEAD/demo-{index}.js",
+            "title": "Three.js particle demo",
+            "text": "const particles = new THREE.Points(geometry, material); animateFallingParticles();",
+            "kind": "repository-code",
+        }
+        for index in range(3)
+    ]
+    audit = audit_research_subtask(subtask, generic_particle_sources)
+    assert audit["passed"] is False
+    assert audit["topic_origins"] == 0
+
+    topical_sources = generic_particle_sources + [
+        {
+            "url": "https://github.com/one/sakura/blob/HEAD/petals.js",
+            "title": "Sakura petals",
+            "text": "const blossom = new THREE.Points(geometry, material);",
+            "kind": "repository-code",
+        },
+        {
+            "url": "https://github.com/two/cherry-tree/blob/HEAD/tree.js",
+            "title": "Cherry blossom tree",
+            "text": "const cherry = new THREE.Sprite(material);",
+            "kind": "repository-code",
+        },
+    ]
+    audit = audit_research_subtask(subtask, topical_sources)
+    assert audit["passed"] is True
+    assert audit["topic_sources"] == 2
+    assert audit["topic_origins"] == 2

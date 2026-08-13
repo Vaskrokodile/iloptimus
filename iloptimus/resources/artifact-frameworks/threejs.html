@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>__TITLE__</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #090d18; }
+    body::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+      background: radial-gradient(circle at 50% 25%, transparent 0 35%, rgba(3, 6, 15, .42) 100%);
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    .hud { position: fixed; inset: 0; z-index: 3; pointer-events: none; padding: clamp(22px, 4vw, 58px); }
+    .eyebrow { color: #ffbfd7; letter-spacing: .22em; text-transform: uppercase; font-size: 11px; font-weight: 750; }
+    h1 { color: #fff7fb; margin: 9px 0 7px; font-size: clamp(31px, 5vw, 64px); line-height: .96; letter-spacing: -.045em; }
+    .subtitle { max-width: 440px; color: rgba(240, 241, 255, .72); line-height: 1.6; font-size: 13px; }
+    .legend {
+      position: absolute; left: clamp(22px, 4vw, 58px); bottom: clamp(20px, 3vw, 42px);
+      display: flex; gap: 18px; color: rgba(255, 255, 255, .62); font-size: 11px;
+    }
+    .legend span { display: inline-flex; gap: 7px; align-items: center; }
+    .legend i { width: 5px; height: 5px; background: #ff9fc5; border-radius: 50%; box-shadow: 0 0 12px #ff9fc5; }
+    .status {
+      position: absolute; right: clamp(22px, 4vw, 58px); top: clamp(22px, 4vw, 58px);
+      color: rgba(255,255,255,.7); font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+      border: 1px solid rgba(255,255,255,.14); border-radius: 999px; padding: 9px 13px;
+      background: rgba(5, 9, 18, .45); backdrop-filter: blur(12px);
+    }
+    .status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: #75f1c4; box-shadow: 0 0 10px #75f1c4; }
+    @media (max-width: 620px) { .subtitle { max-width: 270px; } .legend { gap: 10px; flex-wrap: wrap; max-width: 260px; } }
+  </style>
+  <script type="importmap">
+  {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}
+  </script>
+</head>
+<body>
+  <main class="hud" aria-label="Interactive Three.js scene">
+    <div class="eyebrow">Interactive voxel study</div>
+    <h1>__TITLE__</h1>
+    <div class="subtitle">A living low-poly landscape shaped from instanced voxels, custom shader water, and wind-driven particles.</div>
+    <div class="status">Realtime</div>
+    <div class="legend"><span><i></i>Drag to orbit</span><span><i></i>Scroll to zoom</span><span><i></i>Petals follow the wind</span></div>
+  </main>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x090d18);
+    scene.fog = new THREE.FogExp2(0x10182a, 0.018);
+
+    const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 240);
+    camera.position.set(25, 21, 30);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.18;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.prepend(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.055;
+    controls.minDistance = 15;
+    controls.maxDistance = 68;
+    controls.maxPolarAngle = Math.PI * 0.49;
+    controls.target.set(0, 2.8, 0);
+
+    scene.add(new THREE.HemisphereLight(0xbcd8ff, 0x372734, 1.7));
+    const sun = new THREE.DirectionalLight(0xffe1d1, 3.3);
+    sun.position.set(-18, 30, 16);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.left = sun.shadow.camera.bottom = -28;
+    sun.shadow.camera.right = sun.shadow.camera.top = 28;
+    scene.add(sun);
+    const rim = new THREE.PointLight(0xff70aa, 28, 55, 2);
+    rim.position.set(12, 9, -14);
+    scene.add(rim);
+
+    const world = new THREE.Group();
+    world.rotation.y = -0.18;
+    scene.add(world);
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+
+    function terrainHeight(x, z) {
+      const radius = Math.sqrt(x * x + z * z);
+      const island = Math.max(0, 1 - radius / 13.8);
+      const terraces = Math.floor((island * 7.2 + Math.sin(x * .62) * .38 + Math.cos(z * .55) * .31) * 1.25) / 1.25;
+      return Math.max(0, terraces);
+    }
+
+    function createVoxelIsland() {
+      const placements = [];
+      for (let x = -14; x <= 14; x += 1) {
+        for (let z = -14; z <= 14; z += 1) {
+          const height = terrainHeight(x, z);
+          if (height <= 0 || Math.sqrt(x * x + z * z) > 14.2) continue;
+          for (let y = -1.4; y <= height; y += 1) placements.push({ x, y, z, top: y + 1 > height });
+        }
+      }
+      const geometry = new THREE.BoxGeometry(.96, .96, .96);
+      geometry.translate(0, .48, 0);
+      const material = new THREE.MeshStandardMaterial({ roughness: .88, metalness: .03, vertexColors: true });
+      const terrain = new THREE.InstancedMesh(geometry, material, placements.length);
+      terrain.castShadow = terrain.receiveShadow = true;
+      placements.forEach((block, index) => {
+        dummy.position.set(block.x, block.y, block.z);
+        const edge = Math.sqrt(block.x * block.x + block.z * block.z) / 14;
+        dummy.scale.setScalar(.98 - Math.max(0, edge - .8) * .2);
+        dummy.updateMatrix();
+        terrain.setMatrixAt(index, dummy.matrix);
+        if (block.top) color.setHSL(.30 + Math.sin(block.x) * .012, .42, .28 + block.y * .018);
+        else color.setHSL(.075, .26, .19 + Math.max(0, block.y) * .008);
+        terrain.setColorAt(index, color);
+      });
+      terrain.instanceMatrix.needsUpdate = true;
+      if (terrain.instanceColor) terrain.instanceColor.needsUpdate = true;
+      world.add(terrain);
+    }
+
+    const waterUniforms = {
+      uTime: { value: 0 },
+      uDeep: { value: new THREE.Color(0x071b35) },
+      uShallow: { value: new THREE.Color(0x1d7690) },
+      uSun: { value: new THREE.Color(0xffb7d2) }
+    };
+    function createShaderWater() {
+      const geometry = new THREE.PlaneGeometry(130, 130, 48, 48);
+      const material = new THREE.ShaderMaterial({
+        uniforms: waterUniforms,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        vertexShader: `
+          uniform float uTime;
+          varying float vWave;
+          varying vec3 vWorld;
+          void main() {
+            vec3 p = position;
+            float a = sin(p.x * .32 + uTime * 1.25) * .18;
+            float b = cos(p.y * .27 - uTime * .92) * .14;
+            float c = sin((p.x + p.y) * .12 + uTime * .6) * .12;
+            p.z += a + b + c;
+            vWave = a + b + c;
+            vec4 world = modelMatrix * vec4(p, 1.0);
+            vWorld = world.xyz;
+            gl_Position = projectionMatrix * viewMatrix * world;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uDeep;
+          uniform vec3 uShallow;
+          uniform vec3 uSun;
+          varying float vWave;
+          varying vec3 vWorld;
+          void main() {
+            float rings = .5 + .5 * sin(vWorld.x * .34 + vWorld.z * .28 + vWave * 9.0);
+            vec3 water = mix(uDeep, uShallow, clamp(rings * .32 + vWave + .42, 0.0, 1.0));
+            float glint = pow(max(0.0, vWave + .24), 4.0) * 3.0;
+            gl_FragColor = vec4(water + uSun * glint, .79);
+          }
+        `
+      });
+      const water = new THREE.Mesh(geometry, material);
+      water.rotation.x = -Math.PI / 2;
+      water.position.y = -.78;
+      scene.add(water);
+    }
+
+    function createSakuraTree(x, z, scale = 1) {
+      const tree = new THREE.Group();
+      const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x4d2831, roughness: .92 });
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(.34 * scale, .56 * scale, 5.7 * scale, 7), trunkMaterial);
+      trunk.position.y = 2.85 * scale;
+      trunk.castShadow = true;
+      tree.add(trunk);
+      const branchGeometry = new THREE.CylinderGeometry(.12 * scale, .24 * scale, 3.2 * scale, 6);
+      for (let i = 0; i < 5; i += 1) {
+        const branch = new THREE.Mesh(branchGeometry, trunkMaterial);
+        branch.position.set(Math.cos(i * 1.27) * .65 * scale, (4.3 + (i % 2) * .45) * scale, Math.sin(i * 1.27) * .65 * scale);
+        branch.rotation.z = Math.PI * (.24 + (i % 3) * .04);
+        branch.rotation.y = i * 1.27;
+        branch.castShadow = true;
+        tree.add(branch);
+      }
+      const bloomGeometry = new THREE.IcosahedronGeometry(.82 * scale, 1);
+      const bloomMaterial = new THREE.MeshStandardMaterial({ color: 0xff9fc3, roughness: .76, emissive: 0x2c0718, emissiveIntensity: .35 });
+      for (let i = 0; i < 13; i += 1) {
+        const bloom = new THREE.Mesh(bloomGeometry, bloomMaterial);
+        const angle = i * 2.399;
+        const radius = (1.05 + (i % 4) * .28) * scale;
+        bloom.position.set(Math.cos(angle) * radius, (5.7 + Math.sin(i * 1.8) * .7) * scale, Math.sin(angle) * radius);
+        bloom.scale.set(1.15, .72 + (i % 3) * .12, 1.05);
+        bloom.castShadow = true;
+        tree.add(bloom);
+      }
+      tree.position.set(x, terrainHeight(x, z), z);
+      tree.scale.setScalar(scale);
+      world.add(tree);
+    }
+
+    function createFallingPetals() {
+      const count = 360;
+      const positions = new Float32Array(count * 3);
+      const drift = new Float32Array(count);
+      for (let i = 0; i < count; i += 1) {
+        positions[i * 3] = (Math.random() - .5) * 38;
+        positions[i * 3 + 1] = Math.random() * 22;
+        positions[i * 3 + 2] = (Math.random() - .5) * 38;
+        drift[i] = .35 + Math.random() * .8;
+      }
+      const petalGeometry = new THREE.BufferGeometry();
+      petalGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      petalGeometry.setAttribute('aDrift', new THREE.BufferAttribute(drift, 1));
+      const petalMaterial = new THREE.PointsMaterial({ color: 0xffb0cb, size: .16, transparent: true, opacity: .88, sizeAttenuation: true, depthWrite: false });
+      const petals = new THREE.Points(petalGeometry, petalMaterial);
+      scene.add(petals);
+      return petals;
+    }
+
+    createVoxelIsland();
+    createShaderWater();
+    createSakuraTree(-4, -1, 1.08);
+    createSakuraTree(3, -3, .78);
+    createSakuraTree(2, 5, .64);
+    const petals = createFallingPetals();
+    const clock = new THREE.Clock();
+    let elapsed = 0;
+    let lastInteraction = 0;
+    controls.addEventListener('start', () => { lastInteraction = elapsed; });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = Math.min(clock.getDelta(), .04);
+      elapsed += delta;
+      waterUniforms.uTime.value = elapsed;
+      const positions = petals.geometry.attributes.position;
+      const drifts = petals.geometry.attributes.aDrift;
+      for (let i = 0; i < positions.count; i += 1) {
+        let y = positions.getY(i) - delta * (.72 + drifts.getX(i));
+        let x = positions.getX(i) + Math.sin(elapsed * .9 + i * .17) * delta * .38;
+        let z = positions.getZ(i) + Math.cos(elapsed * .64 + i * .11) * delta * .16;
+        if (y < -.4) { y = 16 + Math.random() * 7; x = (Math.random() - .5) * 32; z = (Math.random() - .5) * 32; }
+        positions.setXYZ(i, x, y, z);
+      }
+      positions.needsUpdate = true;
+      if (elapsed - lastInteraction > 4) {
+        const radius = 34;
+        camera.position.x += (Math.cos(elapsed * .055) * radius - camera.position.x) * .0012;
+        camera.position.z += (Math.sin(elapsed * .055) * radius - camera.position.z) * .0012;
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    function resize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', resize, { passive: true });
+    animate();
+  </script>
+</body>
+</html>

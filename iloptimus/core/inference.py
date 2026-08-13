@@ -75,12 +75,13 @@ def run_completion(
     """
     import mlx.core as mx
     from mlx_lm import generate
-    from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     messages = [{"role": "user", "content": prompt}]
     chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     started = time.time()
     sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
     is_reasoning_model = "deepseek-r1" in handle.huggingface_id.lower()
     reasoning = ""
     if is_reasoning_model:
@@ -96,6 +97,7 @@ def run_completion(
             prompt=chat_text,
             max_tokens=reasoning_budget,
             sampler=sampler,
+            logits_processors=logits_processors,
             verbose=False,
         ).strip()
         if THINK_CLOSE in first:
@@ -115,6 +117,7 @@ def run_completion(
                 prompt=answer_prompt,
                 max_tokens=answer_budget,
                 sampler=sampler,
+                logits_processors=logits_processors,
                 verbose=False,
             ).strip()
     else:
@@ -124,6 +127,7 @@ def run_completion(
             prompt=chat_text,
             max_tokens=max_tokens,
             sampler=sampler,
+            logits_processors=logits_processors,
             verbose=False,
         ).strip()
     if THINK_CLOSE in text:
@@ -167,7 +171,7 @@ def run_tool_completion(
     """
     import mlx.core as mx
     from mlx_lm import generate
-    from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     messages = [{"role": "user", "content": prompt}]
     chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -180,6 +184,7 @@ def run_tool_completion(
         encoded_prefix = json.dumps(next_argument_prefix, ensure_ascii=False)[1:-1]
         prefix += f'{json.dumps(next_argument)}: "{encoded_prefix}'
     sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
     reasoning = ""
     if "deepseek-r1" in handle.huggingface_id.lower():
         reasoning = generate(
@@ -188,6 +193,7 @@ def run_tool_completion(
             prompt=chat_text,
             max_tokens=min(192, max(96, max_tokens // 2)),
             sampler=sampler,
+            logits_processors=logits_processors,
             verbose=False,
         ).strip()
         if THINK_CLOSE in reasoning:
@@ -202,6 +208,7 @@ def run_tool_completion(
         prompt=generation_prompt,
         max_tokens=max_tokens,
         sampler=sampler,
+        logits_processors=logits_processors,
         verbose=False,
     ).strip()
     text = prefix + continuation
@@ -231,7 +238,7 @@ def run_source_completion(
     """Generate plain source text for a trusted write-file wrapper."""
     import mlx.core as mx
     from mlx_lm import generate
-    from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     language = {
         ".py": "python",
@@ -264,6 +271,7 @@ def run_source_completion(
         [{"role": "user", "content": focused_prompt}], tokenize=False, add_generation_prompt=True
     )
     sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
+    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
     reasoning = ""
     if "deepseek-r1" in handle.huggingface_id.lower():
         reasoning = generate(
@@ -272,6 +280,7 @@ def run_source_completion(
             prompt=chat_text,
             max_tokens=min(192, max(96, max_tokens // 2)),
             sampler=sampler,
+            logits_processors=logits_processors,
             verbose=False,
         ).strip()
         if THINK_CLOSE in reasoning:
@@ -286,6 +295,7 @@ def run_source_completion(
         prompt=generation_prompt,
         max_tokens=max_tokens,
         sampler=sampler,
+        logits_processors=logits_processors,
         verbose=False,
     ).strip()
     if "```" in source:

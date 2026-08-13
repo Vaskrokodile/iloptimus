@@ -95,7 +95,7 @@ export interface LearningSession {
   model_id: string;
   query: string;
   initial_answer: string;
-  method: "retrieval" | "qlora-il" | "lora-il";
+  method: string;
   reason: string;
   status: "running" | "completed" | "failed";
   stage: string;
@@ -104,6 +104,11 @@ export interface LearningSession {
   dataset_path: string;
   environment_id: string;
   run_id: string;
+  baseline_artifact_path: string;
+  adapted_artifact_path: string;
+  accepted_adapter_path: string;
+  framework_artifact_path: string;
+  framework_evaluation: { passed?: boolean; score?: number };
   final_answer: string;
   error: string;
   events?: LearningEvent[];

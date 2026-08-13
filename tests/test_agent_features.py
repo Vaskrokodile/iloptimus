@@ -2,12 +2,14 @@ import asyncio
 import json
 
 import pytest
+from iloptimus.core.dataset_tools import save_source_bundle
 from iloptimus.core.hardware import GPUInfo, HardwareInfo
 from iloptimus.core.models import get_model
 from iloptimus.core.performance import estimate_context_performance, record_chat_performance
 from iloptimus.core.skills import list_prompt_skills, route_prompt_skills
 from iloptimus.core.tools import (
     calculate,
+    execute_tool,
     ground_tool_answer,
     looks_like_tool_call,
     normalize_tool_call,
@@ -191,12 +193,61 @@ def test_agent_metadata_endpoints(tmp_path, monkeypatch):
 
     client = TestClient(create_app())
     assert len(client.get("/api/skills").json()) == 6
+    tool_names = {tool["name"] for tool in client.get("/api/tools").json()["built_in"]}
+    assert {"scrape_source", "assemble_dataset", "expand_dataset", "filter_dataset"}.issubset(tool_names)
     tools = client.get("/api/tools").json()
     assert {tool["name"] for tool in tools["built_in"]} >= {"web_search", "web_fetch"}
     assert {server["id"] for server in tools["mcp_servers"]} == {"fetch", "time"}
     estimate = client.get("/api/models/qwen2.5-1.5b/context-estimate?context_window=8192")
     assert estimate.status_code == 200
     assert estimate.json()["context_window"] == 8192
+
+
+def test_dataset_tools_execute_through_the_chat_tool_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path))
+    source = "\n".join(
+        f"const mesh{index} = new THREE.InstancedMesh(new THREE.BoxGeometry(), material, {index + 1});"
+        for index in range(36)
+    )
+    save_source_bundle(
+        "tool-workspace",
+        [
+            {
+                "title": "Licensed voxel implementation",
+                "url": "https://github.com/example/voxel/blob/HEAD/src/main.js",
+                "text": source,
+                "license": "MIT",
+                "kind": "repository-code",
+            }
+        ],
+    )
+    assembled = asyncio.run(
+        execute_tool(
+            "assemble_dataset",
+            {
+                "workspace_id": "tool-workspace",
+                "task": "held-out request",
+                "artifact_kind": "web",
+                "requested_features": ["three.js", "voxel"],
+                "target_examples": 24,
+            },
+            {},
+        )
+    )
+    assert assembled["ok"] is True
+    expanded = asyncio.run(
+        execute_tool("expand_dataset", {"workspace_id": "tool-workspace", "target_examples": 32}, {})
+    )
+    assert expanded["ok"] is True
+    filtered = asyncio.run(
+        execute_tool(
+            "filter_dataset",
+            {"workspace_id": "tool-workspace", "holdout_task": "held-out request", "maximum_rows": 32},
+            {},
+        )
+    )
+    assert filtered["ok"] is True
+    assert filtered["result"]["accepted_rows"] > 0
 
 
 def test_openai_compatibility_prompt_and_native_tool_response():

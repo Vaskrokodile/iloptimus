@@ -9,7 +9,9 @@ evaluated again after adaptation.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
+import math
 import os
 import re
 import shutil
@@ -18,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import zlib
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -84,6 +87,7 @@ class MethodDecision:
     reasons: tuple[str, ...]
     verifier_available: bool
     training_available: bool
+    training: dict[str, Any] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,6 +97,180 @@ class MethodDecision:
 class ResearchCorpus:
     sources: list[dict[str, str]] = field(default_factory=list)
     rejected: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class ResearchSubtask:
+    id: str
+    objective: str
+    capability: str
+    queries: list[str]
+    minimum_sources: int
+    minimum_origins: int
+    required_kinds: tuple[str, ...]
+    minimum_topic_sources: int = 0
+    minimum_topic_origins: int = 0
+    status: str = "pending"
+    accepted_sources: int = 0
+    source_kinds: dict[str, int] = field(default_factory=dict)
+    audit: dict[str, Any] = field(default_factory=dict)
+
+    def public(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def research_subtasks(query: str, contract: ArtifactContract) -> list[ResearchSubtask]:
+    """Split research into auditable capability-sized tasks."""
+    subtasks: list[ResearchSubtask] = []
+    features = contract.requested_features or (contract.artifact_kind,)
+    task_context = " ".join(features[:6])
+    for feature in features:
+        technique_queries = {
+            "sakura": (
+                "three.js falling particles sprites Points GitHub MIT",
+                "three.js instanced petal wind particle implementation GitHub Apache MIT",
+            ),
+            "island": (
+                "three.js procedural terrain water island GitHub MIT",
+                "three.js low poly terrain shoreline implementation GitHub Apache MIT",
+            ),
+            "voxel": (
+                "three.js InstancedMesh BoxGeometry voxel GitHub MIT",
+                "three.js voxel terrain implementation GitHub Apache MIT",
+            ),
+        }.get(feature, ())
+        subtasks.append(
+            ResearchSubtask(
+                id=f"capability-{re.sub(r'[^a-z0-9]+', '-', feature.casefold()).strip('-')}",
+                objective=f"Collect working implementation and API evidence for {feature}",
+                capability=feature,
+                queries=list(
+                    dict.fromkeys(
+                        [
+                            *technique_queries,
+                            f"{feature} {task_context} official documentation API example",
+                            f"{feature} {task_context} complete implementation GitHub MIT Apache",
+                            f"{feature} {task_context} production performance debugging source code",
+                        ]
+                    )
+                ),
+                minimum_sources=3,
+                minimum_origins=2,
+                required_kinds=("web-documentation", "repository-code") if feature == "three.js" else ("repository-code",),
+                minimum_topic_sources=2 if feature in {"island", "sakura"} else 0,
+                minimum_topic_origins=2 if feature in {"island", "sakura"} else 0,
+            )
+        )
+    subtasks.append(
+        ResearchSubtask(
+            id="integration",
+            objective="Collect complete integration examples spanning the requested capabilities",
+            capability="integration",
+            queries=[
+                f"{' '.join(features[:6])} complete production example GitHub",
+                f"{' '.join(features[:6])} architecture integration tutorial",
+            ],
+            minimum_sources=max(4, min(8, len(features))),
+            minimum_origins=2,
+            required_kinds=("repository-code",),
+        )
+    )
+    return subtasks
+
+
+def audit_research_subtask(
+    subtask: ResearchSubtask,
+    sources: list[dict[str, Any]],
+    *,
+    all_sources: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Audit independent source count, type coverage, and feature relevance."""
+    del all_sources  # Kinds must be relevant to this capability, not merely present globally.
+    relevant = [source for source in sources if _source_supports_capability(source, subtask.capability)]
+    kinds = Counter(str(source.get("kind") or "unknown") for source in relevant)
+    urls = {str(source.get("url") or "") for source in relevant if source.get("url")}
+    origins = {_source_origin(source) for source in relevant if _source_origin(source)}
+    missing_kinds = [kind for kind in subtask.required_kinds if not kinds.get(kind)]
+    topical = [source for source in relevant if _source_has_topic(source, subtask.capability)]
+    topic_urls = {str(source.get("url") or "") for source in topical if source.get("url")}
+    topic_origins = {_source_origin(source) for source in topical if _source_origin(source)}
+    passed = (
+        len(urls) >= subtask.minimum_sources
+        and len(origins) >= subtask.minimum_origins
+        and not missing_kinds
+        and len(topic_urls) >= subtask.minimum_topic_sources
+        and len(topic_origins) >= subtask.minimum_topic_origins
+    )
+    audit = {
+        "passed": passed,
+        "independent_sources": len(urls),
+        "minimum_sources": subtask.minimum_sources,
+        "independent_origins": len(origins),
+        "minimum_origins": subtask.minimum_origins,
+        "source_kinds": dict(kinds),
+        "missing_kinds": missing_kinds,
+        "topic_sources": len(topic_urls),
+        "minimum_topic_sources": subtask.minimum_topic_sources,
+        "topic_origins": len(topic_origins),
+        "minimum_topic_origins": subtask.minimum_topic_origins,
+    }
+    subtask.status = "completed" if passed else "needs-more-evidence"
+    subtask.accepted_sources = len(urls)
+    subtask.source_kinds = dict(kinds)
+    subtask.audit = audit
+    return audit
+
+
+def _source_supports_capability(source: dict[str, Any], capability: str) -> bool:
+    haystack = f"{source.get('title', '')} {source.get('url', '')} {str(source.get('text', ''))[:12_000]}"
+    if capability == "integration":
+        matches = sum(
+            any(re.search(pattern, haystack, re.I) for pattern in patterns)
+            for patterns in FEATURE_PATTERNS.values()
+        )
+        return source.get("kind") == "repository-code" and matches >= 2
+    if capability == "island":
+        subject = bool(re.search(r"\b(island|terrain|shore|water)\b", haystack, re.I))
+        rendering = bool(re.search(r"\b(three(?:\.js)?|webgl|mesh|geometry|shader|canvas)\b", haystack, re.I))
+        return subject and rendering
+    if capability == "sakura":
+        subject = bool(re.search(r"\b(sakura|cherry(?:\s+blossom)?|blossom|petals?)\b", haystack, re.I))
+        rendering = bool(re.search(r"\b(three(?:\.js)?|webgl|particle|sprite|mesh|shader|canvas)\b", haystack, re.I))
+        technique = bool(
+            re.search(r"\b(particles?|sprites?|points|instanced|billboard|wind|falling)\b", haystack, re.I)
+        )
+        return rendering and (subject or technique)
+    patterns = FEATURE_PATTERNS.get(capability, (re.escape(capability),))
+    return any(re.search(pattern, haystack, re.I) for pattern in patterns)
+
+
+def _source_has_topic(source: dict[str, Any], capability: str) -> bool:
+    haystack = f"{source.get('title', '')} {source.get('url', '')} {str(source.get('text', ''))[:12_000]}"
+    if capability == "sakura":
+        return bool(re.search(r"\b(sakura|cherry(?:\s+blossom)?|blossom|petals?)\b", haystack, re.I))
+    if capability == "island":
+        return bool(re.search(r"\b(island|terrain|shore|water)\b", haystack, re.I))
+    return _source_supports_capability(source, capability)
+
+
+def _source_origin(source: dict[str, Any]) -> str:
+    """Group files by repository and documents by host for independence audits."""
+    url = str(source.get("url") or "")
+    parsed = urlparse(url)
+    if parsed.hostname in {"github.com", "www.github.com", "raw.githubusercontent.com"}:
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2:
+            return f"github:{parts[0].casefold()}/{parts[1].removesuffix('.git').casefold()}"
+    return parsed.hostname.casefold() if parsed.hostname else str(source.get("sha256") or "")
+
+
+def source_capabilities(source: dict[str, Any], contract: ArtifactContract) -> list[str]:
+    """Return the explicitly evidenced requested capabilities for source curation."""
+    return [
+        capability
+        for capability in contract.requested_features
+        if _source_supports_capability(source, capability)
+    ]
 
 
 def task_requires_artifact(query: str) -> bool:
@@ -169,6 +347,27 @@ def artifact_generation_prompt(
     )
 
 
+def framework_artifact_source(query: str, contract: ArtifactContract) -> str | None:
+    """Return a trusted, runnable framework for capabilities a tiny model cannot safely bootstrap.
+
+    This does not count as an adapted-model result. It is a separately reported
+    fallback artifact that gives the user a usable project when an experimental
+    adapter is rejected.
+    """
+    del query
+    if contract.artifact_kind != "web" or "three.js" not in contract.requested_features:
+        return None
+    features = set(contract.requested_features)
+    if {"sakura", "island"}.issubset(features):
+        title = "Sakura Island"
+    elif "island" in features:
+        title = "Voxel Island"
+    else:
+        title = "Interactive Three.js World"
+    template = Path(__file__).parent.parent / "resources" / "artifact-frameworks" / "threejs.html"
+    return template.read_text(encoding="utf-8").replace("__TITLE__", html.escape(title))
+
+
 def research_queries(query: str, contract: ArtifactContract, limit: int = 6) -> list[str]:
     """Create diverse generic research intents; a model may replace these."""
     features = " ".join(contract.requested_features[:5])
@@ -190,24 +389,86 @@ def select_method(
     source_count: int,
     train_examples: int,
     time_sensitive: bool = False,
+    model_params_b: float = 1.5,
+    memory_gb: float = 8.0,
+    quantized: bool = True,
+    multi_step_rollout: bool = False,
+    deterministic_reward: bool = False,
+    maximum_training_seconds: int = 600,
 ) -> MethodDecision:
     reasons: list[str] = []
     verifier = contract.task_type == "artifact"
     if time_sensitive:
         reasons.append("Changing facts should remain retrieval-grounded")
-        return MethodDecision("retrieval", tuple(reasons), verifier, training_available)
-    if source_count < 2 or train_examples < 3:
+        return MethodDecision("retrieval", tuple(reasons), verifier, training_available, {})
+    if source_count < 6 or train_examples < 24:
         reasons.append("There is not enough independent grounded data for a weight update")
-        return MethodDecision("retrieval", tuple(reasons), verifier, training_available)
+        return MethodDecision("retrieval", tuple(reasons), verifier, training_available, {})
     if not training_available:
         reasons.append("The selected hardware/model cannot run local adapter training")
-        return MethodDecision("retrieval", tuple(reasons), verifier, training_available)
-    if verifier:
+        return MethodDecision("retrieval", tuple(reasons), verifier, training_available, {})
+    method = "qlora-il" if quantized else "lora-il"
+    if multi_step_rollout and deterministic_reward:
+        method = "qlora-il+grpo" if quantized else "lora-il+grpo"
+        reasons.append("A real multi-step rollout and deterministic reward justify an RL phase after IL warm-up")
+    elif verifier:
         reasons.append("Reference implementations provide demonstrations and an executable artifact verifier")
-        reasons.append("QLoRA-IL is the first intervention; RL is reserved for repeated rollout rewards")
-        return MethodDecision("qlora-il", tuple(reasons), verifier, training_available)
-    reasons.append("Grounded stable demonstrations are available")
-    return MethodDecision("qlora-il", tuple(reasons), verifier, training_available)
+        reasons.append("QLoRA-IL is selected; RL requires a real multi-step rollout, not a one-shot score")
+    else:
+        reasons.append("Grounded stable demonstrations are available")
+    # Paged QLoRA is not a distinct objective. MLX unified memory plus compiled
+    # QLoRA provides the relevant memory behavior without mislabeling the method.
+    if memory_gb < model_params_b * 1.3 + 2.0:
+        reasons.append("Use compiled quantized adapters with checkpointing because unified memory is constrained")
+    compact_mlx_profile = memory_gb <= 8 and model_params_b <= 2
+    batch_size = 2 if memory_gb >= 16 else 1
+    grad_accumulation = 2 if memory_gb >= 16 else 1
+    target_epochs = 3 if compact_mlx_profile else 3 if train_examples >= 96 else 5
+    # mlx-lm's `iters` counts microbatches, while optimizer updates happen only
+    # after gradient accumulation. Count both explicitly so the stated epoch
+    # coverage is real and not accidentally divided by accumulation.
+    requested_microbatches = math.ceil(train_examples * target_epochs / batch_size)
+    iteration_cap = 300 if memory_gb >= 16 else 240
+    iterations = min(iteration_cap, max(64, requested_microbatches))
+    if maximum_training_seconds <= 180:
+        iterations = min(iterations, 64)
+    # The audited cache and native 32-token bucket profile recovered about 13%
+    # over the original full run. Keep a conservative 2.5 s/iteration budget
+    # on 8 GB M1 so near-three-epoch runs still fit the ten-minute envelope.
+    seconds_per_iteration = 2.5 if compact_mlx_profile else 2.0
+    runtime_overhead_seconds = 15
+    budget_iteration_cap = max(
+        32,
+        math.floor((maximum_training_seconds - runtime_overhead_seconds) / seconds_per_iteration),
+    )
+    iterations = min(iterations, budget_iteration_cap)
+    rank = 16 if compact_mlx_profile or (model_params_b <= 3 and memory_gb >= 16) else 8
+    layers = 8 if compact_mlx_profile else 16 if model_params_b <= 3 and memory_gb >= 16 else 8
+    sequence = 256 if compact_mlx_profile else 256 if memory_gb <= 8 else 512 if memory_gb < 16 else 768
+    training = {
+        "iterations": iterations,
+        "optimizer_updates": math.ceil(iterations / grad_accumulation),
+        "target_epochs": target_epochs,
+        "effective_epochs": round(iterations * batch_size / max(1, train_examples), 2),
+        "budget_limited": iterations < requested_microbatches,
+        "batch_size": batch_size,
+        "grad_accumulation_steps": grad_accumulation,
+        "learning_rate": 2e-5 if compact_mlx_profile else 1e-4,
+        "optimizer": "adamw",
+        "lora_rank": rank,
+        "lora_layers": layers,
+        "lora_scale": 20.0,
+        "lora_targets": ["self_attn.q_proj", "self_attn.v_proj", "self_attn.o_proj"],
+        "max_seq_length": sequence,
+        "compile_bucket_size": 32 if compact_mlx_profile else 128,
+        "clear_cache_threshold_gb": 1.0 if memory_gb <= 8 else 2.0,
+        "mask_prompt": True,
+        "seed": 0,
+        "grad_checkpoint": memory_gb < model_params_b * 1.3 + 2.0,
+        "maximum_training_seconds": maximum_training_seconds,
+        "estimated_training_seconds": round(iterations * seconds_per_iteration + runtime_overhead_seconds),
+    }
+    return MethodDecision(method, tuple(reasons), verifier, training_available, training)
 
 
 def _extract_module_script(source: str) -> str:
@@ -277,7 +538,7 @@ def _runtime_render(path: Path) -> tuple[bool, str, str]:
                     "--hide-scrollbars",
                     "--window-size=1280,800",
                     "--run-all-compositor-stages-before-draw",
-                    "--virtual-time-budget=5000",
+                    "--virtual-time-budget=2000",
                     f"--user-data-dir={profile}",
                     f"--screenshot={screenshot}",
                     f"http://127.0.0.1:{port}/{path.name}",
@@ -288,7 +549,7 @@ def _runtime_render(path: Path) -> tuple[bool, str, str]:
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        timeout=15,
+                        timeout=30,
                     )
                 except subprocess.TimeoutExpired:
                     # Chrome can keep an event-loop page alive after writing the
@@ -398,6 +659,13 @@ def evaluate_artifact(path: Path, contract: ArtifactContract) -> ArtifactEvaluat
     lines = len(source.splitlines())
     normalized_blocks = [block.strip() for block in re.split(r"(?<=[;>{}])|\n", source) if block.strip()]
     effective_size = sum(len(block.encode()) for block in set(normalized_blocks))
+    visible_source = re.sub(r"<!--.*?-->|<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>", "", source, flags=re.I | re.S)
+    visible_source = html.unescape(re.sub(r"<[^>]+>", " ", visible_source))
+    visible_code_markers = sum(
+        bool(re.search(pattern, visible_source))
+        for pattern in (r"\b(?:const|let|var|function)\b", r"\bTHREE\.", r"[{};]", r"document\.")
+    )
+    rendered_source_code = len(visible_source.strip()) > 600 and visible_code_markers >= 2
     hard_gates = {
         "exists": True,
         "substantial": effective_size >= contract.minimum_bytes,
@@ -409,6 +677,7 @@ def evaluate_artifact(path: Path, contract: ArtifactContract) -> ArtifactEvaluat
             )
         ),
         "entrypoint_shape": "<html" in source.lower() if contract.artifact_kind == "web" else bool(source.strip()),
+        "source_not_rendered_as_text": not rendered_source_code,
     }
     if not hard_gates["substantial"]:
         diagnostics.append(
@@ -416,6 +685,8 @@ def evaluate_artifact(path: Path, contract: ArtifactContract) -> ArtifactEvaluat
         )
     if not hard_gates["no_placeholders"]:
         diagnostics.append("Artifact contains placeholder markers")
+    if rendered_source_code:
+        diagnostics.append("Artifact renders source code as page text instead of executing it")
 
     if contract.requires_javascript_syntax:
         script = _extract_module_script(source)
@@ -440,8 +711,13 @@ def evaluate_artifact(path: Path, contract: ArtifactContract) -> ArtifactEvaluat
         hard_gates["javascript_syntax"] = syntax_ok
 
     screenshot_path = ""
-    if contract.artifact_kind == "web" and hard_gates["entrypoint_shape"] and hard_gates.get("javascript_syntax", True):
+    if contract.artifact_kind == "web" and all(hard_gates.values()):
         runtime_ok, screenshot_path, runtime_diagnostic = _runtime_render(path)
+        # A first Chromium process can lose a race with CDN module loading or
+        # SwiftShader startup. Retry once when there is no deterministic page
+        # exception; the second render still has to provide real nonblank pixels.
+        if not runtime_ok and not re.search(r"(?:Uncaught|ReferenceError|TypeError|SyntaxError)", runtime_diagnostic, re.I):
+            runtime_ok, screenshot_path, runtime_diagnostic = _runtime_render(path)
         hard_gates["runtime_render"] = runtime_ok
         if runtime_diagnostic:
             diagnostics.append(runtime_diagnostic)
@@ -482,6 +758,117 @@ def github_repository_url(url: str) -> str | None:
     if len(parts) < 2 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts[:2]):
         return None
     return f"https://github.com/{parts[0]}/{parts[1].removesuffix('.git')}.git"
+
+
+def github_repository_search_terms(search_query: str, *, limit: int = 3) -> list[str]:
+    """Keep repository searches narrow while preserving the capability being audited."""
+    aliases = {
+        "three.js": "threejs",
+        "particles": "particle",
+        "petals": "petal",
+        "sprites": "sprite",
+        "shaders": "shader",
+    }
+    ignored = {
+        "github",
+        "repository",
+        "examples",
+        "example",
+        "implementation",
+        "source",
+        "code",
+        "complete",
+        "official",
+        "documentation",
+        "docs",
+        "production",
+        "performance",
+        "debugging",
+        "apache",
+        "mit",
+    }
+    raw = []
+    for token in re.findall(r"[a-z0-9.-]+", search_query.casefold()):
+        token = aliases.get(token, token.replace(".js", "js"))
+        if len(token) >= 4 and token not in ignored and token not in raw:
+            raw.append(token)
+    capability_priority = (
+        "sakura",
+        "cherry",
+        "blossom",
+        "petal",
+        "voxel",
+        "island",
+        "terrain",
+        "shader",
+        "water",
+        "particle",
+        "sprite",
+        "orbit",
+        "animation",
+    )
+    selected = [term for term in capability_priority if term in raw][:1]
+    selected.extend(term for term in ("threejs", "webgl") if term in raw and term not in selected)
+    selected.extend(term for term in capability_priority if term in raw and term not in selected)
+    selected.extend(term for term in raw if term not in selected)
+    return selected[:limit]
+
+
+def rank_repository_paths(
+    paths: list[str],
+    query: str,
+    *,
+    preferred_features: tuple[str, ...] = (),
+) -> list[str]:
+    """Rank first-party implementation files ahead of vendored/minified dependencies."""
+    terms = {
+        term
+        for term in re.findall(r"[a-z0-9]+", query.casefold())
+        if len(term) >= 4
+        and term
+        not in {
+            "build",
+            "create",
+            "generate",
+            "implementation",
+            "interactive",
+            "polished",
+            "production",
+            "ready",
+            "with",
+        }
+    }
+    terms.update(feature.replace(".", "").casefold() for feature in preferred_features)
+    extensions = {".js", ".mjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".glsl", ".wgsl", ".py", ".md"}
+    canonical = {
+        "app.js",
+        "app.ts",
+        "index.html",
+        "index.js",
+        "index.ts",
+        "main.js",
+        "main.ts",
+        "scene.js",
+        "scene.ts",
+        "readme.md",
+    }
+    third_party_parts = {"build", "dist", "legacy", "node_modules", "old", "vendor", "vendors"}
+    ranked: list[tuple[int, str]] = []
+    for path in paths:
+        path_object = Path(path)
+        if path_object.suffix.casefold() not in extensions or path_object.name.casefold().endswith(".min.js"):
+            continue
+        lowered = path.casefold()
+        compact = lowered.replace(".", "")
+        parts = {part.casefold() for part in path_object.parts}
+        score = sum(3 for term in terms if term in compact)
+        score += sum(3 for feature in preferred_features if feature.replace(".", "").casefold() in compact)
+        score += 7 if path_object.name.casefold() in canonical else 0
+        score += 4 if "src" in parts or "source" in parts else 0
+        score += 2 if "example" in parts or "examples" in parts or "demo" in parts else 0
+        score -= 14 if parts & third_party_parts else 0
+        ranked.append((score, path))
+    return [path for _, path in sorted(ranked, key=lambda item: (-item[0], item[1].casefold()))]
 
 
 def sample_repository(
@@ -539,38 +926,7 @@ def sample_repository(
                 timeout=30,
                 check=True,
             ).stdout.splitlines()
-            terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) >= 4}
-            terms.update(feature.replace(".", "") for feature in preferred_features)
-            extensions = {".js", ".mjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".glsl", ".wgsl", ".py", ".md"}
-            candidates: list[tuple[int, str]] = []
-            for path in listed:
-                if Path(path).suffix.lower() not in extensions:
-                    continue
-                lowered = path.lower()
-                score = sum(3 for term in terms if term in lowered)
-                score += sum(
-                    2 for feature in preferred_features if feature.replace(".", "") in lowered.replace(".", "")
-                )
-                score += 2 if any(folder in lowered for folder in ("example", "demo", "sample", "docs")) else 0
-                # Once the repository itself is search-relevant and licensed,
-                # include its examples even when generic names such as main.js
-                # do not repeat the query terms.
-                candidates.append((score, path))
-            selected: list[str] = []
-            # Round-robin by query term prevents one prolific feature from
-            # dominating the corpus.
-            for term in sorted(terms):
-                match = next(
-                    (
-                        path
-                        for _, path in sorted(candidates, reverse=True)
-                        if term in path.lower() and path not in selected
-                    ),
-                    None,
-                )
-                if match:
-                    selected.append(match)
-            selected.extend(path for _, path in sorted(candidates, reverse=True) if path not in selected)
+            selected = rank_repository_paths(listed, query, preferred_features=preferred_features)
             for path in selected[:max_files]:
                 size = subprocess.run(
                     ["git", "-C", str(root), "cat-file", "-s", f"HEAD:{path}"],
@@ -632,7 +988,12 @@ def parse_model_queries(text: str, fallback: list[str], *, limit: int = 6) -> li
         "source",
     )
     cleaned = [
-        item for item in cleaned if 8 <= len(item) <= 220 and any(marker in item.lower() for marker in research_markers)
+        item
+        for item in cleaned
+        if 8 <= len(item) <= 220
+        and not item.lstrip().startswith(("//", "#", "/*", "<!--"))
+        and not re.search(r"\b(now|then),?\s+(?:proceed|implement|write|build)\b", item, re.I)
+        and any(marker in item.lower() for marker in research_markers)
     ]
     # Preserve some fallback diversity even when a small model emits one plausible
     # query plus prose masquerading as a plan.

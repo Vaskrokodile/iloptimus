@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+import numpy as np
+
 from .grader import build_prompt, get_num_tasks, grade_response
 
 
@@ -26,17 +28,34 @@ class SFTMetrics:
 
 @dataclass
 class SFTConfig:
-    learning_rate: float = 1e-4  # SGD needs higher LR than Adam (was 1e-5 for Adam)
+    learning_rate: float = 1e-4
     num_iters: int = 100
-    batch_size: int = 1  # safe for 8GB Apple Silicon (was 4)
+    batch_size: int = 1
+    grad_accumulation_steps: int = 1
     lora_rank: int = 8
-    lora_scale: float = 0.1
+    # mlx-lm's LoRALinear multiplies the adapter branch directly by this
+    # value; its supported default is 20.0 (this is not alpha/rank).
+    lora_scale: float = 20.0
     lora_dropout: float = 0.0
     lora_layers: int = 8  # final transformer blocks; safe on 8GB unified memory
+    lora_targets: tuple[str, ...] = (
+        "self_attn.q_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+    )
     max_seq_length: int = 512
     memory_limit_gb: float = 3.0  # QLoRA on int4 uses less memory (was 3.5 for fp16)
     steps_per_eval: int = 20
     grad_clip: float = 1.0
+    mask_prompt: bool = True
+    grad_checkpoint: bool = False
+    optimizer: str = "adamw"
+    weight_decay: float = 0.01
+    # mlx-lm treats zero as "clear every step". Fixed-shape training reuses
+    # buffers safely, so retain a bounded allocator cache for throughput.
+    clear_cache_threshold_gb: float = 1.0
+    compile_bucket_size: int = 128
+    seed: int = 0
 
 
 @dataclass
@@ -78,9 +97,16 @@ def generate_sft_data(
                 ideal_response = task.get("ideal_response", "").strip()
                 if not ideal_response:
                     continue
-                examples.append(SFTExample(prompt=build_prompt(domain, i), response=ideal_response))
+                if environment.get("domain") == "artifact-building":
+                    prompt = (
+                        str(task["prompt"]).strip()
+                        + " Return source code only; do not use reasoning tags, answer tags, or explanatory prose."
+                    )
+                else:
+                    prompt = build_prompt(domain, i)
+                examples.append(SFTExample(prompt=prompt, response=ideal_response))
                 if on_progress:
-                    on_progress(i + 1, n)
+                    on_progress(relative_index + 1, n)
             if examples:
                 return examples
 
@@ -186,11 +212,19 @@ def run_sft(
     Returns the path to the saved adapter.
     """
     import mlx.core as mx
-    import mlx.nn as nn
     import mlx.optimizers as opt
-    from mlx.utils import tree_flatten, tree_map
+    from mlx_lm.tuner.callbacks import TrainingCallback
+    from mlx_lm.tuner.datasets import CacheDataset, CompletionsDataset
+    from mlx_lm.tuner.trainer import TrainingArgs, iterate_batches, train
 
     config = config or SFTConfig()
+
+    # Adapter initialization and dataset shuffling must be reproducible so a
+    # held-out before/after comparison can be rerun exactly.
+    mx.random.seed(config.seed)
+    # mlx-lm currently guards its iterator seed with `if seed`, which skips
+    # the valid seed 0. Seed NumPy before it permutes batches.
+    np.random.seed(config.seed)
 
     # Set memory limits
     if config.memory_limit_gb > 0:
@@ -198,16 +232,18 @@ def run_sft(
             mx.set_memory_limit(int(config.memory_limit_gb * 1024**3))
         elif mx.metal.is_available():
             mx.metal.set_memory_limit(int(config.memory_limit_gb * 1024**3))
+        cache_limit = int(max(0.25, config.clear_cache_threshold_gb) * 1024**3)
         if hasattr(mx, "set_cache_limit"):
-            mx.set_cache_limit(int(1.0 * 1024**3))
+            mx.set_cache_limit(cache_limit)
         elif mx.metal.is_available():
-            mx.metal.set_cache_limit(int(1.0 * 1024**3))
+            mx.metal.set_cache_limit(cache_limit)
         if hasattr(mx, "set_wired_limit"):
             mx.set_wired_limit(int(config.memory_limit_gb * 1024**3))
         elif mx.metal.is_available():
             mx.metal.set_wired_limit(int(config.memory_limit_gb * 1024**3))
 
     # Apply LoRA layers to the model
+    from mlx.utils import tree_flatten
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
     # Freeze the base model before installing adapters. Otherwise
@@ -219,131 +255,93 @@ def run_sft(
         "rank": config.lora_rank,
         "scale": config.lora_scale,
         "dropout": config.lora_dropout,
+        "keys": set(config.lora_targets),
     }
     linear_to_lora_layers(handle.model, num_layers, lora_config)
+    trainable_parameters = sum(
+        int(parameter.size) for _, parameter in tree_flatten(handle.model.trainable_parameters())
+    )
 
-    # Prepare training data: tokenize prompt + response pairs
-    train_data = []
-    for ex in examples:
-        messages = [
-            {"role": "user", "content": ex.prompt},
-            {"role": "assistant", "content": ex.response},
-        ]
-        tokens = handle.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
-        if config.max_seq_length > 1:
-            tokens = tokens[-config.max_seq_length:]
-        train_data.append(tokens)
-
-    # Optimizer — SGD is used instead of Adam because Adam's second moment
-    # estimate can produce NaN when combined with int4 quantized weights
-    # (QLoRA). SGD is simpler and more stable for this use case.
-    optimizer = opt.SGD(learning_rate=config.learning_rate)
-
-    # Compile the cross-entropy loss computation for faster forward+backward.
-    # mx.compile fuses element-wise operations into single Metal kernels.
-    # Note: we compile only the loss math (not the model call) because
-    # nn.value_and_grad passes model.trainable_parameters() as a dict,
-    # which mx.compile can't handle as a callable.
-    @mx.compile
-    def compiled_cross_entropy(logits, target_tokens):
-        log_probs = nn.log_softmax(logits, axis=-1)
-        token_logprobs = mx.take_along_axis(
-            log_probs[0],
-            target_tokens[0][:, None],
-            axis=-1,
-        ).squeeze(-1)
-        return -token_logprobs.mean()
-
-    # Training loop
-    os.makedirs(adapter_path, exist_ok=True)
-
-    for iteration in range(config.num_iters):
-        t0 = time.time()
-
-        if hasattr(mx, "reset_peak_memory"):
-            mx.reset_peak_memory()
-        elif mx.metal.is_available():
-            mx.metal.reset_peak_memory()
-        mx.clear_cache()
-
-        handle.model.train()
-
-        # Sample a batch
-        batch_indices = [
-            (iteration * config.batch_size + b) % len(train_data)
-            for b in range(min(config.batch_size, len(train_data)))
-        ]
-
-        loss_sum = 0.0
-        grad_accum = None
-        n_steps = 0
-
-        for idx in batch_indices:
-            tokens = train_data[idx]
-            if len(tokens) < 2:
-                continue
-
-            input_tokens = mx.array(tokens[:-1])[None]  # [1, seq-1]
-            target_tokens = mx.array(tokens[1:])[None]  # [1, seq-1]
-
-            def loss_fn():
-                logits = handle.model(input_tokens)
-                return compiled_cross_entropy(logits, target_tokens)
-
-            loss_value_and_grad = nn.value_and_grad(handle.model, loss_fn)
-            loss_val, grad = loss_value_and_grad()
-            mx.eval(loss_val, grad)
-
-            loss_f = float(loss_val)
-            # Skip NaN or Inf gradients — these corrupt model weights.
-            # QLoRA on int4 can produce Inf logits for out-of-distribution inputs.
-            if loss_f != loss_f or loss_f in (float("inf"), float("-inf")):
-                continue
-
-            loss_sum += loss_f
-            n_steps += 1
-
-            if grad_accum is None:
-                grad_accum = grad
-            else:
-                grad_accum = tree_map(lambda x, y: x + y, grad_accum, grad)
-
-            mx.clear_cache()
-
-        # Apply gradient update
-        if grad_accum is not None and n_steps > 0:
-            grad_accum = tree_map(lambda x: x / n_steps, grad_accum)
-            # Gradient clipping to prevent NaN
-            if config.grad_clip > 0:
-                grad_accum = tree_map(
-                    lambda x: mx.clip(x, -config.grad_clip, config.grad_clip),
-                    grad_accum,
-                )
-            optimizer.update(handle.model, grad_accum)
-            mx.eval(handle.model.parameters(), optimizer.state)
-
-        elapsed = time.time() - t0
-
-        peak_mem = 0.0
-        if hasattr(mx, "get_peak_memory"):
-            peak_mem = mx.get_peak_memory() / 1e9
-        elif mx.metal.is_available():
-            peak_mem = mx.metal.get_peak_memory() / 1e9
-
-        metrics = SFTMetrics(
-            iteration=iteration,
-            loss=loss_sum / max(n_steps, 1),
-            learning_rate=config.learning_rate,
-            elapsed=elapsed,
-            peak_memory_gb=peak_mem,
+    rows = [{"prompt": example.prompt, "completion": example.response} for example in examples]
+    train_data = CacheDataset(
+        CompletionsDataset(
+            rows,
+            handle.tokenizer,
+            prompt_key="prompt",
+            completion_key="completion",
+            mask_prompt=config.mask_prompt,
         )
+    )
+    optimizer_name = config.optimizer.casefold()
+    if optimizer_name == "sgd":
+        optimizer = opt.SGD(learning_rate=config.learning_rate)
+    elif optimizer_name == "adam":
+        optimizer = opt.Adam(learning_rate=config.learning_rate)
+    elif optimizer_name == "adamw":
+        optimizer = opt.AdamW(learning_rate=config.learning_rate, weight_decay=config.weight_decay)
+    else:
+        raise ValueError(f"Unsupported SFT optimizer: {config.optimizer}")
 
-        if on_metrics:
-            on_metrics(metrics)
+    os.makedirs(adapter_path, exist_ok=True)
+    adapter_file = os.path.join(adapter_path, "adapters.safetensors")
 
-    # Save adapter
-    adapter_weights = dict(tree_flatten(handle.model.trainable_parameters()))
-    mx.save_safetensors(f"{adapter_path}/adapters.safetensors", adapter_weights)
+    class MetricsCallback(TrainingCallback):
+        def __init__(self) -> None:
+            self.started = time.perf_counter()
+
+        def on_train_loss_report(self, info: dict) -> None:
+            if not on_metrics:
+                return
+            on_metrics(
+                SFTMetrics(
+                    iteration=max(0, int(info["iteration"]) - 1),
+                    loss=float(info["train_loss"]),
+                    learning_rate=float(info["learning_rate"]),
+                    elapsed=time.perf_counter() - self.started,
+                    peak_memory_gb=float(info["peak_memory"]),
+                )
+            )
+
+    args = TrainingArgs(
+        batch_size=min(config.batch_size, len(train_data)),
+        iters=config.num_iters,
+        val_batches=0,
+        steps_per_report=max(1, min(config.steps_per_eval, config.num_iters)),
+        steps_per_eval=config.num_iters + 1,
+        steps_per_save=config.num_iters + 1,
+        max_seq_length=config.max_seq_length,
+        adapter_file=adapter_file,
+        grad_checkpoint=config.grad_checkpoint,
+        grad_accumulation_steps=config.grad_accumulation_steps,
+        clear_cache_threshold=int(config.clear_cache_threshold_gb * 1024**3),
+    )
+
+    def bucketed_batches(*args, **kwargs):
+        """Use bounded stable shapes so MLX reuses compiled training graphs.
+
+        mlx-lm starts with 32-token padding. The selected bucket may coarsen
+        those shapes when a benchmark shows compile latency outweighs padding;
+        compact TTC currently retains the faster native 32-token buckets.
+        """
+        kwargs.setdefault("seed", config.seed)
+        bucket = max(32, config.compile_bucket_size)
+        maximum = int(kwargs.get("max_seq_length") or config.max_seq_length)
+        for batch, lengths in iterate_batches(*args, **kwargs):
+            current = int(batch.shape[1])
+            target = min(maximum, ((current + bucket - 1) // bucket) * bucket)
+            if current < target:
+                batch = mx.pad(batch, ((0, 0), (0, target - current)))
+            yield batch, lengths
+
+    train(
+        handle.model,
+        optimizer,
+        train_data,
+        args=args,
+        iterate_batches=bucketed_batches,
+        training_callback=MetricsCallback(),
+    )
+
     cfg = {
         "adapter_path": os.path.basename(adapter_path),
         "fine_tune_type": "lora",
@@ -352,7 +350,17 @@ def run_sft(
             "rank": config.lora_rank,
             "scale": config.lora_scale,
             "dropout": config.lora_dropout,
+            "targets": list(config.lora_targets),
         },
+        "optimizer": config.optimizer,
+        "mask_prompt": config.mask_prompt,
+        "batch_size": config.batch_size,
+        "grad_accumulation_steps": config.grad_accumulation_steps,
+        "max_seq_length": config.max_seq_length,
+        "compile_bucket_size": config.compile_bucket_size,
+        "clear_cache_threshold_gb": config.clear_cache_threshold_gb,
+        "trainable_parameters": trainable_parameters,
+        "seed": config.seed,
     }
     with open(f"{adapter_path}/adapter_config.json", "w") as f:
         json.dump(cfg, f, indent=4)
