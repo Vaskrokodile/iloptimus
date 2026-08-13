@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -80,6 +81,22 @@ from .core.stateful_environments import (
     simulate_response,
 )
 from .core.storage import app_home, ensure_app_dirs, run_dir
+from .core.test_time_compute import (
+    acceptance_decision,
+    artifact_generation_prompt,
+    build_artifact_dataset,
+    derive_artifact_contract,
+    evaluate_artifact,
+    github_repository_url,
+    parse_model_queries,
+    research_queries,
+    sample_repository,
+    strip_learning_command,
+    task_requires_artifact,
+)
+from .core.test_time_compute import (
+    select_method as select_ttc_method,
+)
 from .core.tools import (
     execute_tool,
     ground_tool_answer,
@@ -246,8 +263,7 @@ def _openai_prompt(request: OpenAIChatRequest) -> str:
             "Output only one JSON object with keys tool_name and arguments; do not use a code fence. "
             "For write_file, copy the user's requested path exactly and write complete runnable source code, not the expected output; encode file line breaks as \\n inside content. "
             "For run_command, use cwd for the containing directory. Never invent a tool. "
-            "Fill every required argument. Available tools:\n"
-            + json.dumps(tool_specs, ensure_ascii=False)
+            "Fill every required argument. Available tools:\n" + json.dumps(tool_specs, ensure_ascii=False)
         )
 
     transcript: list[str] = []
@@ -372,6 +388,480 @@ def create_app() -> FastAPI:
             await _run_in_executor(release_memory)
             await run_pipeline_subprocess(run_id)
 
+    async def _generate_ttc_artifact(
+        model_info,
+        precision: str,
+        source: str,
+        prompt: str,
+        destination: Path,
+        *,
+        adapter_path: Path | None = None,
+    ):
+        """Generate an artifact while keeping MLX ownership exclusive."""
+        from .core.inference import release_memory
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        async with _chat_model_lock:
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
+            handle = await _run_in_executor(
+                load_model,
+                model_info.huggingface_id,
+                precision,
+                adapter_path=str(adapter_path) if adapter_path else None,
+                source_override=source,
+            )
+            result = await _run_in_executor(
+                run_source_completion,
+                handle,
+                prompt,
+                destination.name,
+                3_072,
+                0.0,
+            )
+            destination.write_text((result.answer or result.text).strip() + "\n", encoding="utf-8")
+            del handle
+            await _run_in_executor(release_memory)
+        return result
+
+    async def _model_research_plan(
+        model_info,
+        precision: str,
+        source: str,
+        query: str,
+        contract,
+        diagnostics: list[str],
+    ) -> list[str]:
+        """Let the failing local model author the tool queries; constrain only their envelope."""
+        from .core.inference import release_memory
+
+        fallback = research_queries(query, contract)
+        prompt = (
+            "Your artifact attempt failed objective verification. Plan web research before retrying. "
+            "Return ONLY a JSON array of 4 to 6 concise search queries. Cover official documentation, "
+            "permissively licensed repositories, implementation examples, performance, and the failed checks.\n"
+            f"Task: {strip_learning_command(query)}\n"
+            f"Failed checks: {json.dumps(diagnostics[:10], ensure_ascii=False)}\n"
+            f"Requested capabilities: {json.dumps(contract.requested_features)}"
+        )
+        async with _chat_model_lock:
+            _chat_models.clear()
+            await _run_in_executor(release_memory)
+            handle = await _run_in_executor(
+                load_model,
+                model_info.huggingface_id,
+                precision,
+                source_override=source,
+            )
+            result = await _run_in_executor(run_completion, handle, prompt, 512, 0.1)
+            del handle
+            await _run_in_executor(release_memory)
+        return parse_model_queries(result.answer or result.text, fallback)
+
+    async def _collect_ttc_sources(
+        session_id: str,
+        queries: list[str],
+        task: str,
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        sources: list[dict[str, str]] = []
+        rejected: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        repo_urls: list[str] = []
+        relevance_terms = {
+            term.replace(".", "")
+            for term in re.findall(r"[a-z0-9.]+", task.lower())
+            if len(term.replace(".", "")) >= 4
+            and term
+            not in {
+                "generate",
+                "build",
+                "create",
+                "make",
+                "very",
+                "good",
+                "with",
+                "custom",
+                "polished",
+                "detailed",
+                "responsive",
+                "production",
+                "ready",
+                "animation",
+                "interactive",
+            }
+        }
+
+        async def github_repository_search(search_query: str) -> list[str]:
+            """Use GitHub's public repository search as a tool fallback, never a hidden curated repo list."""
+            raw_terms = [
+                term.replace(".js", "js")
+                for term in re.findall(r"[a-z0-9.-]+", search_query.lower())
+                if len(term) >= 4
+                and term not in {"github", "repository", "examples", "implementation", "source", "code"}
+            ]
+            priority = ("threejs", "voxel", "shader", "animation", "water", "sakura", "webgl")
+            terms = [term for term in priority if term in raw_terms][:3]
+            if len(terms) < 2:
+                terms.extend(term for term in raw_terms if term not in terms)
+            terms = terms[:3]
+            if not terms:
+                return []
+            try:
+                payload = await web_fetch(
+                    "https://api.github.com/search/repositories?q="
+                    + "+".join(terms)
+                    + "&sort=stars&order=desc&per_page=8"
+                )
+                parsed = json.loads(str(payload.get("text") or "{}"))
+            except (ValueError, json.JSONDecodeError):
+                return []
+            return [
+                str(item.get("clone_url") or "")
+                for item in parsed.get("items", [])
+                if isinstance(item, dict) and item.get("clone_url")
+            ]
+
+        for index, search_query in enumerate(queries):
+            learning.emit(
+                session_id,
+                "tool-search",
+                f"Local model called web_search: {search_query}",
+                0.25 + 0.02 * index,
+                tool="web_search",
+                query=search_query,
+            )
+            try:
+                search = await web_search(search_query)
+            except Exception as error:
+                rejected.append({"url": "", "reason": str(error), "query": search_query})
+                search = {"results": []}
+            if any(
+                marker in search_query.lower()
+                for marker in ("github", "repository", "source code", "permissive license")
+            ):
+                for repository_url in await github_repository_search(search_query):
+                    if repository_url not in repo_urls:
+                        repo_urls.append(repository_url)
+            rows = search.get("results", [])[:8]
+            for row in rows:
+                url = str(row.get("url") or "")
+                repository = github_repository_url(url)
+                if repository and repository not in repo_urls:
+                    repo_urls.append(repository)
+                if repository:
+                    # Repository contents are admitted only by sample_repository,
+                    # after clone-time license verification and blob provenance.
+                    continue
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                try:
+                    fetched = await web_fetch(url)
+                except Exception as error:
+                    rejected.append({"url": url, "reason": str(error)})
+                    continue
+                text = str(fetched.get("text") or row.get("snippet") or "").strip()
+                if len(text) < 180:
+                    rejected.append({"url": url, "reason": "Source contained too little readable text"})
+                    continue
+                relevance_haystack = re.sub(
+                    r"[^a-z0-9]+", "", f"{row.get('title', '')} {row.get('url', '')} {text[:4000]}".lower()
+                )
+                matched_terms = {term for term in relevance_terms if term in relevance_haystack}
+                if len(matched_terms) < min(2, len(relevance_terms)):
+                    rejected.append({"url": url, "reason": "Source failed task-capability relevance threshold"})
+                    continue
+                sources.append(
+                    {
+                        "title": str(row.get("title") or url),
+                        "url": str(fetched.get("url") or url),
+                        "text": text[:40_000],
+                        "license": "documentation",
+                        "kind": "web-documentation",
+                    }
+                )
+        for repository_url in repo_urls[:6]:
+            corpus = await asyncio.to_thread(
+                sample_repository,
+                repository_url,
+                task,
+                max_files=12,
+                preferred_features=tuple(sorted(relevance_terms)),
+            )
+            sources.extend(corpus.sources)
+            rejected.extend(corpus.rejected)
+        # Hash-level de-duplication keeps prolific mirrors from dominating.
+        unique: list[dict[str, str]] = []
+        seen_hashes: set[str] = set()
+        for item in sources:
+            digest = hashlib.sha256(item["text"].encode()).hexdigest()
+            if digest not in seen_hashes:
+                seen_hashes.add(digest)
+                unique.append(item)
+        return unique, rejected
+
+    def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    async def run_artifact_ttc_session(session_id: str) -> None:
+        session = learning.get(session_id)
+        if not session:
+            return
+        try:
+            query = strip_learning_command(session.query)
+            contract = derive_artifact_contract(query)
+            session.task_type = "artifact"
+            session.contract = contract.public()
+            root = learning.root / session.id
+            root.mkdir(parents=True, exist_ok=True)
+
+            model_info = get_model(session.model_id)
+            if not model_info:
+                raise RuntimeError("The selected model no longer exists")
+            hw = _get_hardware()
+            precision = compatible_precision(model_info, hw)
+            source = resolve_model_source(model_info.id, precision, hw.recommended_backend)
+            if not source:
+                raise RuntimeError("Download the selected model before running test-time adaptation")
+
+            generation_prompt = artifact_generation_prompt(query, contract)
+            baseline_path = root / "baseline" / contract.entrypoint
+            learning.emit(session_id, "baseline-generation", "Generating the unadapted holdout artifact", 0.08)
+            baseline_result = await _generate_ttc_artifact(
+                model_info,
+                precision,
+                source,
+                generation_prompt,
+                baseline_path,
+            )
+            session.baseline_artifact_path = str(baseline_path)
+            learning.emit(
+                session_id,
+                "baseline-verification",
+                f"Baseline generated at {baseline_result.tokens_per_sec:.1f} tok/s; executing independent checks",
+                0.16,
+            )
+            baseline = await asyncio.to_thread(evaluate_artifact, baseline_path, contract)
+            session.baseline_evaluation = baseline.public()
+            if baseline.passed:
+                learning.complete(
+                    session_id,
+                    f"The baseline already passed every objective gate (score {baseline.score:.3f}); no weight update was justified. "
+                    f"Artifact: {baseline_path}",
+                )
+                return
+
+            failed_checks = baseline.diagnostics or [key for key, value in baseline.hard_gates.items() if not value]
+            learning.emit(
+                session_id,
+                "failure-detected",
+                f"Baseline failed with score {baseline.score:.3f}; the model must research before retrying",
+                0.21,
+                evaluation=baseline.public(),
+            )
+            queries = await _model_research_plan(model_info, precision, source, query, contract, failed_checks)
+            session.search_queries = queries
+            learning.emit(session_id, "research-planning", f"Local model authored {len(queries)} tool queries", 0.24)
+            sources, rejected = await _collect_ttc_sources(session_id, queries, query)
+            session.sources = [
+                {"title": item["title"], "url": item["url"], "kind": item.get("kind", "")} for item in sources
+            ]
+            research_manifest = root / "research-manifest.json"
+            research_manifest.write_text(
+                json.dumps(
+                    {
+                        "queries": queries,
+                        "accepted_sources": session.sources,
+                        "rejected_sources": rejected,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            session.research_manifest_path = str(research_manifest)
+            learning.emit(
+                session_id,
+                "research-complete",
+                f"Collected {len(sources)} independent documents/code files; rejected {len(rejected)} unsafe or unusable sources",
+                0.41,
+            )
+
+            dataset, manifest = build_artifact_dataset(query, sources, contract, max_examples=48)
+            train_count = len(dataset) - 1
+            decision = select_ttc_method(
+                contract=contract,
+                training_available=hw.recommended_backend == "mlx",
+                source_count=len({item.get("url", "") for item in sources}),
+                train_examples=train_count,
+            )
+            session.method = decision.method
+            session.method_decision = decision.public()
+            dataset_path = root / "dataset.jsonl"
+            manifest_path = root / "dataset-manifest.json"
+            _write_jsonl(dataset_path, dataset)
+            manifest.update({"method_decision": decision.public(), "baseline_evaluation": baseline.public()})
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            session.dataset_path = str(dataset_path)
+            session.dataset_manifest_path = str(manifest_path)
+            learning.emit(
+                session_id,
+                "dataset",
+                f"Built {train_count} provenance-tracked training examples; exact user task remains holdout row 0",
+                0.48,
+                method=decision.public(),
+            )
+            if decision.method != "qlora-il":
+                raise RuntimeError("The corpus was insufficient for a defensible local weight update")
+
+            environment = save_environment(
+                {
+                    "name": f"TTC artifact patterns {session.id}",
+                    "mode": "IL",
+                    "goal": f"Learn reusable implementation patterns for a failed {contract.artifact_kind} artifact",
+                    "description": "Automatically compiled, licensed, provenance-tracked test-time adaptation corpus",
+                    "domain": "artifact-building",
+                    "reward": {"correctness": 0.8, "reasoning": 0.1, "efficiency": 0.1, "method": "artifact-verifier"},
+                    "tasks": [
+                        {
+                            "name": "Held-out artifact contract" if index == 0 else f"Grounded pattern {index}",
+                            "prompt": example["prompt"],
+                            "expected_answer": example["expected_answer"],
+                            "ideal_response": example["ideal_response"],
+                            "criteria": ["preserves verified APIs", "returns runnable source"],
+                            "grader": {
+                                "type": "contains_all",
+                                "terms": [
+                                    term
+                                    for term in re.findall(r"[A-Za-z_$][A-Za-z0-9_$]{4,}", example["expected_answer"])
+                                ][:2]
+                                or ["source"],
+                            },
+                            "difficulty": "hard",
+                        }
+                        for index, example in enumerate(dataset)
+                    ],
+                    "builder": {"model_id": session.model_id, "used_model_output": True},
+                }
+            )
+            session.environment_id = environment["id"]
+            iterations = min(8, max(4, train_count))
+            config = RunConfig(
+                model_id=session.model_id,
+                taskset_id=environment["taskset_id"],
+                backend="mlx",
+                precision=precision,
+                sft_iters=iterations,
+                sft_lr=5e-4,
+                sft_task_offset=1,
+                sft_tasks=train_count,
+                grpo_iters=0,
+                benchmark_tasks=1,
+                rollouts_per_example=1,
+                max_seq_length=384,
+                max_reasoning_tokens=24,
+                max_answer_tokens=48,
+            )
+            run = create_run(config)
+            session.run_id = run.id
+            learning.emit(
+                session_id,
+                "training",
+                f"Selected QLoRA-IL ({iterations} iterations); RL was rejected because this one-shot task lacks a stable rollout process",
+                0.54,
+                run_id=run.id,
+            )
+            await run_training_exclusive(run.id)
+            completed = get_run(run.id)
+            if not completed or completed.status != "completed":
+                detail = completed.events[-1]["message"] if completed and completed.events else "Training failed"
+                raise RuntimeError(detail)
+
+            adapter_path = run_dir(run.id) / "adapters" / "sft"
+            adapted_path = root / "adapted" / contract.entrypoint
+            learning.emit(
+                session_id, "retry-generation", "Retrying the untouched original task with the trained adapter", 0.86
+            )
+            await _generate_ttc_artifact(
+                model_info,
+                precision,
+                source,
+                generation_prompt,
+                adapted_path,
+                adapter_path=adapter_path,
+            )
+            session.adapted_artifact_path = str(adapted_path)
+            adapted = await asyncio.to_thread(evaluate_artifact, adapted_path, contract)
+            session.adapted_evaluation = adapted.public()
+            acceptance = acceptance_decision(baseline, adapted)
+            session.acceptance = acceptance
+            decision_path = root / "acceptance.json"
+            decision_path.write_text(json.dumps(acceptance, indent=2) + "\n", encoding="utf-8")
+            experiment_path = root / "experiment.json"
+            experiment_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "model_id": session.model_id,
+                        "model_source": source,
+                        "precision": precision,
+                        "task_hash": manifest["task_hash"],
+                        "contract": contract.public(),
+                        "generation": {
+                            "max_tokens": 3072,
+                            "temperature": 0.0,
+                            "identical_prompt": True,
+                            "prompt_sha256": hashlib.sha256(generation_prompt.encode()).hexdigest(),
+                        },
+                        "search_queries": queries,
+                        "method_decision": decision.public(),
+                        "run_id": run.id,
+                        "adapter_path": str(adapter_path),
+                        "training": {
+                            "elapsed_seconds": completed.elapsed_seconds,
+                            "sft_iterations": iterations,
+                            "sft_loss_history": completed.sft_loss_history,
+                            "baseline_accuracy": completed.baseline_accuracy,
+                            "post_sft_accuracy": completed.post_sft_accuracy,
+                        },
+                        "artifact_sha256": {
+                            "baseline": hashlib.sha256(baseline_path.read_bytes()).hexdigest(),
+                            "adapted": hashlib.sha256(adapted_path.read_bytes()).hexdigest(),
+                        },
+                        "baseline_evaluation": baseline.public(),
+                        "adapted_evaluation": adapted.public(),
+                        "acceptance": acceptance,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            if acceptance["accepted"]:
+                session.accepted_adapter_path = str(adapter_path)
+            learning.emit(
+                session_id,
+                "acceptance",
+                acceptance["reason"],
+                0.97,
+                acceptance=acceptance,
+                adapted_evaluation=adapted.public(),
+            )
+            verdict = "accepted" if acceptance["accepted"] else "rejected"
+            learning.complete(
+                session_id,
+                f"Test-time adapter {verdict}. Baseline {baseline.score:.3f}; retry {adapted.score:.3f}; "
+                f"measured change {acceptance['improvement']:+.3f}. Baseline: {baseline_path}. Retry: {adapted_path}. "
+                f"The adapter is retained only when it passes all gates and clears the improvement margin.",
+            )
+        except Exception as error:
+            learning.fail(session_id, str(error))
+
     async def run_learning_session(session_id: str) -> None:
         session = learning.get(session_id)
         if not session:
@@ -396,11 +886,13 @@ def create_app() -> FastAPI:
                 text = str(fetched_payload.get("text") or row.get("snippet") or "").strip()
                 if not text:
                     continue
-                sources.append({
-                    "title": str(row.get("title") or fetched_payload.get("url") or "Source"),
-                    "url": str(fetched_payload.get("url") or row.get("url") or ""),
-                    "text": text[:12_000],
-                })
+                sources.append(
+                    {
+                        "title": str(row.get("title") or fetched_payload.get("url") or "Source"),
+                        "url": str(fetched_payload.get("url") or row.get("url") or ""),
+                        "text": text[:12_000],
+                    }
+                )
             if not sources:
                 raise RuntimeError("Research did not return a readable public source")
             session.sources = [{"title": item["title"], "url": item["url"]} for item in sources]
@@ -435,31 +927,49 @@ def create_app() -> FastAPI:
             learning.emit(session_id, "dataset", f"Built {len(dataset)} grounded IL demonstrations", 0.42)
 
             if session.method == "retrieval":
-                learning.emit(session_id, "evaluating", "Fresh knowledge stays retrieval-grounded instead of being baked into weights", 0.82)
+                learning.emit(
+                    session_id,
+                    "evaluating",
+                    "Fresh knowledge stays retrieval-grounded instead of being baked into weights",
+                    0.82,
+                )
                 learning.complete(session_id, researched_answer)
                 return
 
-            environment = save_environment({
-                "name": f"Learned knowledge {session.id}",
-                "mode": "IL",
-                "goal": f"Answer the research question accurately from grounded evidence: {query}",
-                "description": f"Automatically compiled evidence-grounded IL dataset for: {query}",
-                "domain": "knowledge",
-                "reward": {"correctness": 0.75, "reasoning": 0.2, "efficiency": 0.05, "method": "evidence-grounded"},
-                "tasks": [
-                    {
-                        "name": f"Grounded evidence {index + 1}",
-                        "prompt": example["prompt"],
-                        "expected_answer": example["expected_answer"],
-                        "ideal_response": example["ideal_response"],
-                        "criteria": ["uses the saved evidence", "does not invent unsupported claims"],
-                        "grader": {"type": "contains_all", "terms": [term for term in re.findall(r"[A-Za-z0-9]{5,}", example["expected_answer"])[:2]] or ["Source"]},
-                        "difficulty": "medium",
-                    }
-                    for index, example in enumerate(dataset)
-                ],
-                "builder": {"model_id": session.model_id, "used_model_output": True},
-            })
+            environment = save_environment(
+                {
+                    "name": f"Learned knowledge {session.id}",
+                    "mode": "IL",
+                    "goal": f"Answer the research question accurately from grounded evidence: {query}",
+                    "description": f"Automatically compiled evidence-grounded IL dataset for: {query}",
+                    "domain": "knowledge",
+                    "reward": {
+                        "correctness": 0.75,
+                        "reasoning": 0.2,
+                        "efficiency": 0.05,
+                        "method": "evidence-grounded",
+                    },
+                    "tasks": [
+                        {
+                            "name": f"Grounded evidence {index + 1}",
+                            "prompt": example["prompt"],
+                            "expected_answer": example["expected_answer"],
+                            "ideal_response": example["ideal_response"],
+                            "criteria": ["uses the saved evidence", "does not invent unsupported claims"],
+                            "grader": {
+                                "type": "contains_all",
+                                "terms": [
+                                    term for term in re.findall(r"[A-Za-z0-9]{5,}", example["expected_answer"])[:2]
+                                ]
+                                or ["Source"],
+                            },
+                            "difficulty": "medium",
+                        }
+                        for index, example in enumerate(dataset)
+                    ],
+                    "builder": {"model_id": session.model_id, "used_model_output": True},
+                }
+            )
             session.environment_id = environment["id"]
             learning.emit(session_id, "training", "Starting real int4 QLoRA IL adapter training", 0.5)
 
@@ -493,7 +1003,9 @@ def create_app() -> FastAPI:
                 detail = completed.events[-1]["message"] if completed and completed.events else "Training failed"
                 raise RuntimeError(detail)
 
-            learning.emit(session_id, "evaluating", "Loading the learned adapter and answering without injected evidence", 0.92)
+            learning.emit(
+                session_id, "evaluating", "Loading the learned adapter and answering without injected evidence", 0.92
+            )
             adapter_path = run_dir(run.id) / "adapters" / "sft"
             async with _chat_model_lock:
                 from .core.inference import release_memory
@@ -648,7 +1160,11 @@ def create_app() -> FastAPI:
             )
         answer = result.answer or result.text
         call = next(
-            (candidate for candidate in parse_tool_calls(answer) if candidate[0] in {tool["function"]["name"] for tool in tools}),
+            (
+                candidate
+                for candidate in parse_tool_calls(answer)
+                if candidate[0] in {tool["function"]["name"] for tool in tools}
+            ),
             None,
         )
         response_id = f"resp_{uuid.uuid4().hex[:18]}"
@@ -1014,6 +1530,48 @@ def create_app() -> FastAPI:
         model_info = get_model(req.model_id)
         if not model_info:
             raise HTTPException(400, f"Unknown model: {req.model_id}")
+
+        artifact_ttc_requested = re.match(
+            r"^/(?:learn|ttc)\s+", req.message, flags=re.IGNORECASE
+        ) is not None and task_requires_artifact(strip_learning_command(req.message))
+        if artifact_ttc_requested:
+            hw = _get_hardware()
+            precision = compatible_precision(model_info, hw)
+            training_available = (
+                hw.recommended_backend == "mlx"
+                and resolve_model_source(model_info.id, precision, hw.recommended_backend) is not None
+            )
+            if not training_available:
+                raise HTTPException(409, "Download a locally trainable model before running artifact test-time compute")
+            session = learning.create(
+                req.model_id,
+                req.message,
+                "The original task is reserved for independent baseline generation.",
+                "pending-verifier-selection",
+                "The user explicitly requested failure-driven artifact test-time compute",
+            )
+            session.task_type = "artifact"
+            session.contract = derive_artifact_contract(strip_learning_command(req.message)).public()
+            asyncio.create_task(run_artifact_ttc_session(session.id))
+            return {
+                "answer": "I’m running a measured test-time-compute cycle: generate an unadapted artifact, execute it, let the local model plan web searches if it fails, build a licensed holdout-safe corpus, select an adaptation method, train, retry, and accept only measured improvement.",
+                "reasoning": "",
+                "tokens_per_sec": 0.0,
+                "model_id": req.model_id,
+                "context_tokens": _estimated_tokens(req.message),
+                "context_window": req.context_window,
+                "context_utilization": min(1.0, _estimated_tokens(req.message) / max(1, req.context_window)),
+                "active_skills": [],
+                "tool_calls": [],
+                "uncertainty": {
+                    "score": 1.0,
+                    "needs_research": True,
+                    "explicit": True,
+                    "time_sensitive": False,
+                    "reasons": ["Artifact TTC requested"],
+                },
+                "learning_session": session.public(),
+            }
 
         estimate = estimate_context_performance(model_info, _get_hardware(), req.context_window)
         selected_context = min(req.context_window, estimate.max_safe_context, model_info.context_length)
@@ -1396,6 +1954,29 @@ def create_app() -> FastAPI:
         if not session:
             raise HTTPException(404, "Learning session not found")
         return {**session.public(), "events": learning.events(session_id)}
+
+    @app.get("/api/learning/{session_id}/artifact/{variant}")
+    async def get_learning_artifact(session_id: str, variant: str):
+        session = learning.get(session_id)
+        if not session:
+            raise HTTPException(404, "Learning session not found")
+        if variant not in {"baseline", "adapted", "baseline-screenshot", "adapted-screenshot"}:
+            raise HTTPException(404, "Artifact variant not found")
+        if variant == "baseline":
+            path = Path(session.baseline_artifact_path)
+        elif variant == "adapted":
+            path = Path(session.adapted_artifact_path)
+        elif variant == "baseline-screenshot":
+            path = Path(str(session.baseline_evaluation.get("screenshot_path") or ""))
+        else:
+            path = Path(str(session.adapted_evaluation.get("screenshot_path") or ""))
+        root = (learning.root / session.id).resolve()
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            raise HTTPException(404, "Artifact is not available") from None
+        return FileResponse(str(resolved))
 
     @app.get("/api/learning/{session_id}/events")
     async def stream_learning_events(session_id: str, after: int = 0):

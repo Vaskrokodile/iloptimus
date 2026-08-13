@@ -26,8 +26,8 @@ from typing import Optional
 
 # DeepSeek-R1-Distill think tokens — actual native tags (token 151648 / 151649)
 # Using chr() to avoid the tags being interpreted as HTML by tooling
-THINK_OPEN = chr(60) + "think" + chr(62)           # <think>
-THINK_CLOSE = chr(60) + "/think" + chr(62)          # </think>
+THINK_OPEN = chr(60) + "think" + chr(62)  # <think>
+THINK_CLOSE = chr(60) + "/think" + chr(62)  # </think>
 EOS = chr(60) + "\uff5cend\u2581of\u2581sentence\uff5c" + chr(62)  # <｜end▁of▁sentence｜>
 
 # Token IDs for DeepSeek-R1-Distill (Qwen2 tokenizer)
@@ -48,6 +48,7 @@ class InferenceResult:
 @dataclass
 class ModelHandle:
     """A loaded MLX model + tokenizer, ready for inference."""
+
     model: object
     tokenizer: object
     model_id: str
@@ -234,6 +235,8 @@ def run_source_completion(
 
     language = {
         ".py": "python",
+        ".html": "html",
+        ".css": "css",
         ".js": "javascript",
         ".ts": "typescript",
         ".tsx": "tsx",
@@ -335,6 +338,7 @@ def _mlx_community_repo(huggingface_id: str, precision: str) -> Optional[str]:
 def _set_mlx_memory_limits():
     """Set conservative MLX memory limits for 8GB Apple Silicon."""
     import mlx.core as mx
+
     if mx.metal.is_available():
         try:
             mx.set_memory_limit(int(3.5 * 1024**3))
@@ -385,6 +389,7 @@ def load_model(
 
     import mlx.core as mx
     import mlx_lm
+
     gc.collect()
     mx.clear_cache()
     _set_mlx_memory_limits()
@@ -411,6 +416,7 @@ def load_model(
             # and we fall through to the local convert path
             try:
                 from huggingface_hub import try_to_load_from_cache
+
                 cached = try_to_load_from_cache(mlx_repo, "config.json")
                 if cached is not None and os.path.exists(cached):
                     load_source = mlx_repo
@@ -420,6 +426,7 @@ def load_model(
             _mlx_repo_cache[cache_key] = load_source
         else:
             from huggingface_hub import HfApi
+
             api = HfApi()
             try:
                 api.model_info(mlx_repo)
@@ -432,6 +439,7 @@ def load_model(
     # ---- Fall back to download + local convert ----
     if load_source is None and not local_path.exists():
         from mlx_lm import convert
+
         print(f"Downloading and converting {huggingface_id} to MLX ({precision})...")
         t0 = time.time()
         convert(
@@ -440,7 +448,7 @@ def load_model(
             quantize=quantized,
             q_bits=q_bits,
         )
-        print(f"Converted in {time.time()-t0:.1f}s -> {local_path}")
+        print(f"Converted in {time.time() - t0:.1f}s -> {local_path}")
         load_source = str(local_path)
     elif load_source is None and local_path.exists():
         load_source = str(local_path)
@@ -449,7 +457,7 @@ def load_model(
     print(f"Loading model from {load_source}...")
     t0 = time.time()
     model, tokenizer = mlx_lm.load(load_source)
-    print(f"Model loaded in {time.time()-t0:.1f}s")
+    print(f"Model loaded in {time.time() - t0:.1f}s")
 
     # Dequantize only if explicitly requested (legacy path — QLoRA makes this unnecessary)
     if dequantize and quantized:
@@ -460,6 +468,7 @@ def load_model(
     # Load LoRA adapter if provided
     if adapter_path and os.path.exists(adapter_path):
         from mlx_lm.tuner.utils import load_adapters
+
         print(f"Loading LoRA adapters from {adapter_path}...")
         load_adapters(model, adapter_path)
         print("Adapters loaded")
@@ -490,6 +499,7 @@ def swap_adapters(model: object, adapter_path: str | None) -> object:
     has_lora = any("lora" in k.lower() for k, _ in model.named_modules())
     if has_lora:
         from mlx_lm.tuner.utils import remove_lora_layers
+
         model = remove_lora_layers(model)
         mx.eval(model.parameters())
         mx.clear_cache()
@@ -584,9 +594,7 @@ def run_inference_speculative(
     from mlx_dspark.target import Target
 
     messages = [{"role": "user", "content": prompt}]
-    chat_text = handle.tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     t0 = time.time()
 
@@ -629,6 +637,7 @@ def run_inference_speculative(
         reasoning = raw_text.strip()
         forced = True
         from mlx_lm import generate
+
         forced_prompt = chat_text + raw_text + THINK_CLOSE + "\n<answer>The answer is "
         out2 = generate(
             handle.model,
@@ -695,9 +704,7 @@ def run_inference(
     from mlx_lm.sample_utils import make_sampler
 
     messages = [{"role": "user", "content": prompt}]
-    chat_tokens = handle.tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True
-    )
+    chat_tokens = handle.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
 
     t0 = time.time()
 
@@ -755,9 +762,8 @@ def run_inference(
         # Reasoning budget exhausted without think-close — generate answer
         # from scratch with a forced think-close tag
         from mlx_lm import generate
-        chat_text = handle.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+
+        chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         forced_prompt = chat_text + reasoning_text + THINK_CLOSE + "\n<answer>The answer is "
         out2 = generate(
             handle.model,
@@ -807,6 +813,7 @@ def get_memory_info() -> dict:
     """Get current MLX memory usage info."""
     try:
         import mlx.core as mx
+
         info = {}
         if hasattr(mx, "get_peak_memory"):
             info["peak_memory_gb"] = mx.get_peak_memory() / 1e9
@@ -825,6 +832,7 @@ def clear_cache():
     """Clear MLX cache to free memory."""
     try:
         import mlx.core as mx
+
         mx.clear_cache()
     except ImportError:
         pass

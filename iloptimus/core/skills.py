@@ -61,8 +61,25 @@ SKILL_KEYWORDS: dict[str, set[str]] = {
         "research notebook",
     },
     "knowledge-dataset": {
-        "dataset", "fine tune", "finetune", "qlora", "lora", "train on", "learn about",
-        "research this", "grounded data", "evaluation set",
+        "dataset",
+        "fine tune",
+        "finetune",
+        "qlora",
+        "lora",
+        "train on",
+        "learn about",
+        "research this",
+        "grounded data",
+        "evaluation set",
+    },
+    "test-time-artifact": {
+        "test time compute",
+        "test-time compute",
+        "/ttc",
+        "artifact",
+        "runnable code",
+        "verify artifact",
+        "failed generation",
     },
 }
 
@@ -72,6 +89,7 @@ SKILL_MIN_SCORES = {
     "security-best-practices": 1,
     "jupyter-notebook": 1,
     "knowledge-dataset": 1,
+    "test-time-artifact": 1,
 }
 
 

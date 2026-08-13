@@ -45,6 +45,11 @@ Then open `http://127.0.0.1:7860` in your browser.
 7. **Use prompt skills and tools** — trusted Markdown guidance is selected from
    the prompt, while public-web and configured MCP tools run through an audited
    execution boundary
+8. **Run measured test-time compute** — `/ttc <artifact task>` generates and
+   executes an unadapted baseline, lets the failing local model research through
+   audited web tools, builds a licensed provenance-tracked corpus, selects a
+   defensible adaptation method, retries, and rejects adapters that do not pass
+   every objective gate. See [the TTC design and current experiment](docs/test-time-compute.md).
 
 ## Local Agent Skills and Tools
 

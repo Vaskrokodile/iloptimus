@@ -36,6 +36,7 @@ def test_packaged_skills_are_discoverable_and_frontend_routes_automatically():
         "knowledge-dataset",
         "playwright",
         "security-best-practices",
+        "test-time-artifact",
     }
     selected = route_prompt_skills("Build a polished React frontend dashboard with responsive CSS")
     assert selected[0].id == "frontend-design"
@@ -189,7 +190,7 @@ def test_agent_metadata_endpoints(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     client = TestClient(create_app())
-    assert len(client.get("/api/skills").json()) == 5
+    assert len(client.get("/api/skills").json()) == 6
     tools = client.get("/api/tools").json()
     assert {tool["name"] for tool in tools["built_in"]} >= {"web_search", "web_fetch"}
     assert {server["id"] for server in tools["mcp_servers"]} == {"fetch", "time"}

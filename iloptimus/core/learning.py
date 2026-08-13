@@ -30,8 +30,21 @@ UNCERTAINTY_PHRASES = (
 )
 
 TIME_SENSITIVE_TERMS = (
-    "latest", "today", "currently", "current ", "recent", "this week", "this month",
-    "this year", "price", "weather", "news", "version", "release", "president", "ceo",
+    "latest",
+    "today",
+    "currently",
+    "current ",
+    "recent",
+    "this week",
+    "this month",
+    "this year",
+    "price",
+    "weather",
+    "news",
+    "version",
+    "release",
+    "president",
+    "ceo",
 )
 
 
@@ -52,8 +65,7 @@ def assess_uncertainty(query: str, answer: str, *, tool_failed: bool = False) ->
     normalized_query = " ".join(query.lower().split())
     normalized_answer = " ".join(answer.lower().split())
     explicit = normalized_query.startswith("/learn ") or any(
-        phrase in normalized_query
-        for phrase in ("research this", "verify this", "learn about", "investigate this")
+        phrase in normalized_query for phrase in ("research this", "verify this", "learn about", "investigate this")
     )
     time_sensitive = any(term in normalized_query for term in TIME_SENSITIVE_TERMS)
     reasons: list[str] = []
@@ -106,9 +118,21 @@ class LearningSession:
     stage: str = "uncertainty-detected"
     progress: float = 0.03
     sources: list[dict[str, str]] = field(default_factory=list)
+    task_type: str = "knowledge"
+    contract: dict[str, Any] = field(default_factory=dict)
+    method_decision: dict[str, Any] = field(default_factory=dict)
+    search_queries: list[str] = field(default_factory=list)
+    research_manifest_path: str = ""
     dataset_path: str = ""
+    dataset_manifest_path: str = ""
     environment_id: str = ""
     run_id: str = ""
+    baseline_artifact_path: str = ""
+    baseline_evaluation: dict[str, Any] = field(default_factory=dict)
+    adapted_artifact_path: str = ""
+    adapted_evaluation: dict[str, Any] = field(default_factory=dict)
+    acceptance: dict[str, Any] = field(default_factory=dict)
+    accepted_adapter_path: str = ""
     final_answer: str = ""
     error: str = ""
     created_at: float = field(default_factory=time.time)
@@ -204,7 +228,7 @@ class LearningManager:
         session = self._sessions[session_id]
         session.final_answer = answer
         session.status = "completed"
-        self.emit(session_id, "completed", "The learned answer passed the final response step", 1.0)
+        self.emit(session_id, "completed", "The test-time-compute cycle reached a measured terminal verdict", 1.0)
 
     def fail(self, session_id: str, error: str) -> None:
         session = self._sessions[session_id]
@@ -226,7 +250,12 @@ class LearningManager:
                 try:
                     await asyncio.wait_for(condition.wait(), timeout=15)
                 except TimeoutError:
-                    yield {"sequence": cursor, "stage": "heartbeat", "message": "heartbeat", "progress": session.progress}
+                    yield {
+                        "sequence": cursor,
+                        "stage": "heartbeat",
+                        "message": "heartbeat",
+                        "progress": session.progress,
+                    }
 
 
 def build_research_dataset(query: str, sources: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -240,18 +269,23 @@ def build_research_dataset(query: str, sources: list[dict[str, str]]) -> list[di
         title = source.get("title") or f"Source {index + 1}"
         url = source.get("url", "")
         combined.append(f"{title}: {text}")
-        examples.append({
-            "prompt": f"For the research question ‘{query}’, summarize only the useful evidence in {title} and cite its URL.",
-            "ideal_response": f"<reasoning>I will use only the supplied source and avoid unsupported claims.</reasoning><answer>{text}\n\nSource: {url}</answer>",
-            "expected_answer": text[:500],
-            "source_url": url,
-        })
+        examples.append(
+            {
+                "prompt": f"For the research question ‘{query}’, summarize only the useful evidence in {title} and cite its URL.",
+                "ideal_response": f"<reasoning>I will use only the supplied source and avoid unsupported claims.</reasoning><answer>{text}\n\nSource: {url}</answer>",
+                "expected_answer": text[:500],
+                "source_url": url,
+            }
+        )
     if combined:
         synthesis = "\n\n".join(combined)[:6000]
-        examples.insert(0, {
-            "prompt": query,
-            "ideal_response": f"<reasoning>I will synthesize the retrieved evidence and preserve its citations.</reasoning><answer>{synthesis}</answer>",
-            "expected_answer": synthesis[:700],
-            "source_url": "",
-        })
+        examples.insert(
+            0,
+            {
+                "prompt": query,
+                "ideal_response": f"<reasoning>I will synthesize the retrieved evidence and preserve its citations.</reasoning><answer>{synthesis}</answer>",
+                "expected_answer": synthesis[:700],
+                "source_url": "",
+            },
+        )
     return examples

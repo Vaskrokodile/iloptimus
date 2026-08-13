@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import html
 import ipaddress
 import json
@@ -25,6 +26,7 @@ from .storage import app_home
 
 MAX_WEB_BYTES = 128_000
 USER_AGENT = "ILOptimus/0.2 (+local AI research workspace)"
+SEARCH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,88 @@ class _SearchParser(HTMLParser):
             self._url = None
 
 
+class _BingSearchParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._in_result = False
+        self._in_heading = False
+        self._url: str | None = None
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "li" and "b_algo" in values.get("class", ""):
+            self._in_result = True
+        elif self._in_result and tag == "h2":
+            self._in_heading = True
+        elif self._in_result and self._in_heading and tag == "a" and not self._url:
+            href = values.get("href", "")
+            if href.startswith(("http://", "https://")):
+                parsed = urlparse(html.unescape(href))
+                encoded = parse_qs(parsed.query).get("u", [""])[0]
+                if parsed.hostname and parsed.hostname.endswith("bing.com") and encoded.startswith("a1"):
+                    try:
+                        padding = "=" * (-len(encoded[2:]) % 4)
+                        href = base64.b64decode(encoded[2:] + padding).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError):
+                        pass
+                self._url = href
+                self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._url:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._url:
+            self.results.append({"title": " ".join(self._text).strip(), "url": self._url})
+            self._url = None
+        elif tag == "h2" and self._in_heading:
+            self._in_heading = False
+        elif tag == "li" and self._in_result:
+            self._in_result = False
+
+
+class _BraveSearchParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
+        self._capture = ""
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        classes = values.get("class", "")
+        if tag == "a" and " l1" in f" {classes}" and values.get("href", "").startswith(("http://", "https://")):
+            self._current = {"url": html.unescape(values["href"]), "title": ""}
+        elif self._current and tag == "div" and "title" in classes.split():
+            self._capture = "title"
+            self._text = []
+        elif self._current and tag == "div" and "content" in classes.split():
+            self._capture = "snippet"
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "div" or not self._current or not self._capture:
+            return
+        value = re.sub(r"\s+", " ", " ".join(self._text)).strip()
+        if self._capture == "title":
+            self._current["title"] = value
+        else:
+            self._current["snippet"] = value
+            if self._current.get("title"):
+                self.results.append(self._current)
+            self._current = None
+        self._capture = ""
+        self._text = []
+
+
 async def _public_host(hostname: str) -> bool:
     try:
         records = await asyncio.get_running_loop().run_in_executor(
@@ -182,18 +266,45 @@ async def web_search(query: str) -> dict[str, Any]:
         query.strip(),
         flags=re.IGNORECASE,
     )
-    query = re.split(r"\s+(?:and\s+)?(?:cite|include|provide)\s+(?:the\s+)?(?:official\s+)?sources?\b", query, 1, flags=re.IGNORECASE)[0]
+    query = re.split(
+        r"\s+(?:and\s+)?(?:cite|include|provide)\s+(?:the\s+)?(?:official\s+)?sources?\b", query, 1, flags=re.IGNORECASE
+    )[0]
     query = re.split(r"\s+if you (?:cannot|can't)\b", query, 1, flags=re.IGNORECASE)[0]
     query = query.strip(" .?!")[:220] or original_query.strip()[:220]
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-    page = await web_fetch(url)
-    # web_fetch strips HTML, so retrieve the fixed, already-validated search host
-    async with httpx.AsyncClient(timeout=12, headers={"User-Agent": USER_AGENT}) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-    parser = _SearchParser()
-    parser.feed(response.text[:MAX_WEB_BYTES])
-    rows = parser.results[:8]
+    providers = [
+        (f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", _SearchParser),
+        (f"https://search.brave.com/search?q={quote_plus(query)}&source=web", _BraveSearchParser),
+        (f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en-US&cc=US&mkt=en-US", _BingSearchParser),
+    ]
+    rows: list[dict[str, str]] = []
+    search_page = ""
+    errors: list[str] = []
+    query_terms = {
+        term.replace(".", "")
+        for term in re.findall(r"[a-z0-9.]+", query.lower())
+        if len(term.replace(".", "")) >= 4 and term not in {"with", "from", "examples", "implementation"}
+    }
+    async with httpx.AsyncClient(timeout=12, headers={"User-Agent": SEARCH_USER_AGENT}) as client:
+        for url, parser_type in providers:
+            try:
+                await validate_public_url(url)
+                response = await client.get(url, follow_redirects=True)
+                response.raise_for_status()
+                parser = parser_type()
+                parser.feed(response.text[:MAX_WEB_BYTES])
+                rows = [
+                    row
+                    for row in parser.results
+                    if any(term in re.sub(r"[^a-z0-9]+", "", " ".join(row.values()).lower()) for term in query_terms)
+                ][:8]
+                if rows:
+                    search_page = str(response.url)
+                    break
+                errors.append(f"{urlparse(url).hostname}: no parseable results")
+            except Exception as error:
+                errors.append(f"{urlparse(url).hostname}: {error}")
+    if not rows:
+        raise RuntimeError("Search providers returned no readable results: " + "; ".join(errors))
     fetched = await asyncio.gather(
         *(web_fetch(row["url"]) for row in rows[:3]),
         return_exceptions=True,
@@ -201,7 +312,7 @@ async def web_search(query: str) -> dict[str, Any]:
     for row, content in zip(rows[:3], fetched):
         if isinstance(content, dict):
             row["snippet"] = re.sub(r"\s+", " ", str(content.get("text", ""))).strip()[:1800]
-    return {"query": query, "results": rows, "search_page": page["url"]}
+    return {"query": query, "results": rows, "search_page": search_page}
 
 
 _BINARY = {
@@ -415,7 +526,9 @@ def tool_result_fallback(name: str, payload: dict[str, Any]) -> str:
                 if row.get("snippet"):
                     lines.append(f"  {str(row['snippet'])[:650]}")
             return "\n".join(lines)
-        return "I could not verify this from public search results. Try a narrower query or open an official URL directly."
+        return (
+            "I could not verify this from public search results. Try a narrower query or open an official URL directly."
+        )
     if name == "web_fetch" and isinstance(result, dict):
         text = str(result.get("text", "")).strip()
         return f"From {result.get('url', 'the requested page')}:\n\n{text[:6000]}"
