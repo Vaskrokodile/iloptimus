@@ -10,9 +10,17 @@ import EnvironmentPlayPage from "./pages/EnvironmentPlayPage";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import WorkspaceTabs from "./components/WorkspaceTabs";
 import RsiPanelPage from "./pages/RsiPanelPage";
+import ResearchPaperPage from "./pages/ResearchPaperPage";
+import OptimusMindMapPage from "./pages/OptimusMindMapPage";
 
 export default function App() {
   const location = useLocation();
+  if (location.pathname === "/research/sakura-island") {
+    return <ResearchPaperPage />;
+  }
+  if (location.pathname === "/research/optimus-map") {
+    return <OptimusMindMapPage />;
+  }
   return (
     <ThemeProvider>
       <div className="app-shell">

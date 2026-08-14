@@ -2571,6 +2571,8 @@ def create_app() -> FastAPI:
             "baseline-screenshot",
             "adapted-screenshot",
             "framework-screenshot",
+            "experiment",
+            "baseline-authorship",
         }:
             raise HTTPException(404, "Artifact variant not found")
         if variant == "baseline":
@@ -2583,8 +2585,13 @@ def create_app() -> FastAPI:
             path = Path(str(session.baseline_evaluation.get("screenshot_path") or ""))
         elif variant == "adapted-screenshot":
             path = Path(str(session.adapted_evaluation.get("screenshot_path") or ""))
-        else:
+        elif variant == "framework-screenshot":
             path = Path(str(session.framework_evaluation.get("screenshot_path") or ""))
+        elif variant == "experiment":
+            path = learning.root / session.id / "experiment.json"
+        else:
+            baseline_path = Path(session.baseline_artifact_path)
+            path = baseline_path.with_suffix(baseline_path.suffix + ".authorship.json")
         root = (learning.root / session.id).resolve()
         try:
             resolved = path.resolve(strict=True)

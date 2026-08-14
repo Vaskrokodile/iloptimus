@@ -27,6 +27,21 @@ iloptimus serve
 
 Then open `http://127.0.0.1:7860` in your browser.
 
+## Autonomous Sakura Research Report
+
+Open `http://127.0.0.1:7860/research/sakura-island` for the evidence-backed
+research report covering the autonomous Sakura Island run. It includes the
+stored Chromium capture, retry trajectory, model-versus-framework authorship
+boundary, capability scores, measured pipeline improvements, limitations, and
+links to the exact local experiment and provenance manifests.
+
+Open `http://127.0.0.1:7860/research/optimus-map` for the interactive system
+mind map. It covers every product surface, local runtime, no-code IL/RL path,
+training stage, persistence layer, verification gate, and the current
+self-improvement loop. Click any node for the exact behavior, or switch to
+**Self-improvement loop** to isolate test-time compute, failure-skill memory,
+automated curation, adapter training, exact retry, and the Sakura proof run.
+
 ## What It Does
 
 1. **Detects your hardware** — CPU, RAM, GPU (Apple Silicon / CUDA / None),

@@ -1,9 +1,11 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import {
+  BookOpen,
   Cpu,
   FlaskConical,
   MessageSquarePlus,
+  Network,
   Workflow,
   Layers3,
   Settings,
@@ -17,6 +19,8 @@ const navItems = [
   { to: "/models", label: "Model library", icon: Cpu },
   { to: "/pipelines", label: "IL / RL", icon: Workflow },
   { to: "/environments", label: "My environments", icon: Layers3 },
+  { to: "/research/sakura-island", label: "Research paper", icon: BookOpen },
+  { to: "/research/optimus-map", label: "Optimus map", icon: Network },
 ];
 
 const recentChats = [

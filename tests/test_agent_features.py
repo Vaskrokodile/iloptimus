@@ -1,9 +1,11 @@
 import asyncio
 import json
+from dataclasses import asdict
 
 import pytest
 from iloptimus.core.dataset_tools import save_source_bundle
 from iloptimus.core.hardware import GPUInfo, HardwareInfo
+from iloptimus.core.learning import LearningSession
 from iloptimus.core.models import get_model
 from iloptimus.core.performance import estimate_context_performance, record_chat_performance
 from iloptimus.core.skills import list_prompt_skills, route_prompt_skills
@@ -204,6 +206,38 @@ def test_agent_metadata_endpoints(tmp_path, monkeypatch):
     assert estimate.status_code == 200
     assert estimate.json()["context_window"] == 8192
     assert client.get("/api/learning-skills").json() == {"skills": []}
+
+
+def test_learning_report_exposes_scoped_reproducibility_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("ILOPTIMUS_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+
+    session_root = tmp_path / "learning" / "paper-session"
+    baseline = session_root / "baseline" / "index.html"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("<h1>verified artifact</h1>", encoding="utf-8")
+    authorship = baseline.with_suffix(".html.authorship.json")
+    authorship.write_text('{"authorship":"local-model-scene-spec"}\n', encoding="utf-8")
+    (session_root / "experiment.json").write_text('{"acceptance":{"accepted":true}}\n', encoding="utf-8")
+    session = LearningSession(
+        id="paper-session",
+        model_id="local-model",
+        query="build a scene",
+        initial_answer="",
+        method="framework-scene-design",
+        reason="test",
+        status="completed",
+        baseline_artifact_path=str(baseline),
+    )
+    (session_root / "session.json").write_text(json.dumps(asdict(session)), encoding="utf-8")
+
+    client = TestClient(create_app())
+    experiment = client.get("/api/learning/paper-session/artifact/experiment")
+    manifest = client.get("/api/learning/paper-session/artifact/baseline-authorship")
+    assert experiment.status_code == 200
+    assert experiment.json()["acceptance"]["accepted"] is True
+    assert manifest.status_code == 200
+    assert manifest.json()["authorship"] == "local-model-scene-spec"
 
 
 def test_dataset_tools_execute_through_the_chat_tool_boundary(tmp_path, monkeypatch):
