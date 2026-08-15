@@ -112,7 +112,18 @@ def estimate_context_performance(model: ModelInfo, hw: HardwareInfo, requested_c
     fits = model_memory + kv_cache <= available * 0.9
 
     bandwidth = _memory_bandwidth_gbps(hw)
-    backend_efficiency = 0.36 if hw.recommended_backend == "mlx" else 0.31 if hw.gpu.type == "cuda" else 0.12
+    # Backend efficiency factors: how much of theoretical memory bandwidth is
+    # realized as decode throughput. MLX is highly tuned for Apple Silicon.
+    # vLLM's paged attention + continuous batching is very efficient on CUDA;
+    # raw torch/CPU is the slowest path.
+    if hw.recommended_backend == "mlx":
+        backend_efficiency = 0.36
+    elif hw.recommended_backend == "vllm":
+        backend_efficiency = 0.34
+    elif hw.gpu.type == "cuda":
+        backend_efficiency = 0.22  # raw torch fallback if vLLM not installed
+    else:
+        backend_efficiency = 0.12
     base_tps = bandwidth * backend_efficiency / max(model_memory, 0.25)
     architecture_factor = 0.90 if "deepseek" in model.family else 1.0
     context_penalty = 1.0 / (1.0 + (context / 16_384) * (0.06 + 0.008 * math.sqrt(model.params_b)))

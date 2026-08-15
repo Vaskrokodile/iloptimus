@@ -1,63 +1,69 @@
-"""Real model loader and inference engine using mlx_lm.
+"""Real model loader and inference engine (backend-agnostic dispatcher).
 
-Loads models from HuggingFace (with optional quantization), runs inference
-via two-stage generation (reasoning + answer), and manages MLX memory.
+Loads models via the active backend (MLX on Apple Silicon, vLLM + HF Transformers
+on NVIDIA CUDA) and runs the shared two-stage generation, tool-JSON, source, and
+function-completion orchestration on top of backend primitives.
 
-Optimizations:
-- QLoRA: trains directly on int4 quantized models (no dequantization needed)
-- KV cache reuse: reasoning and answer stages share a persistent KV cache
-- Early stopping: stops generation when think-close token is emitted
-- Adapter hot-swapping: swap LoRA adapters without reloading the base model
-- explicit local snapshot loading after a model is downloaded
-- Speculative decoding: optional prompt-lookup n-gram speculation via mlx-dspark
-  (lossless, helps when output copies from context — code reproduction, RAG,
-  summarization; neutral or slightly slower for novel reasoning text)
+The backend-specific work (loading, generation, KV-cache management, training)
+lives in :mod:`iloptimus.core.backends`. This module holds the orchestration
+that is identical across backends:
+
+- two-stage reasoning + answer generation with think-close splitting
+- tool-call JSON envelope completion (grammar-constrained decoding equivalent)
+- plain source / single-function / single-JSON completion with early-stop parsing
+- adapter hot-swapping and memory release
+
+DeepSeek-R1-Distill think tokens are shared constants re-exported from
+:mod:`iloptimus.core.backends.base`.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# DeepSeek-R1-Distill think tokens — actual native tags (token 151648 / 151649)
-# Using chr() to avoid the tags being interpreted as HTML by tooling
-THINK_OPEN = chr(60) + "think" + chr(62)  # <think>
-THINK_CLOSE = chr(60) + "/think" + chr(62)  # </think>
-EOS = chr(60) + "\uff5cend\u2581of\u2581sentence\uff5c" + chr(62)  # <｜end▁of▁sentence｜>
+from .backends import (
+    EOS,
+    GenerateChunk,
+    GenerateResult,
+    InferenceResult,
+    ModelHandle,
+    THINK_CLOSE,
+    THINK_CLOSE_TOKEN_ID,
+    THINK_OPEN,
+    get_backend,
+    is_reasoning_model,
+)
 
-# Token IDs for DeepSeek-R1-Distill (Qwen2 tokenizer)
-THINK_CLOSE_TOKEN_ID = 151649
+__all__ = [
+    "EOS",
+    "GenerateResult",
+    "InferenceResult",
+    "ModelHandle",
+    "THINK_CLOSE",
+    "THINK_CLOSE_TOKEN_ID",
+    "THINK_OPEN",
+    "clear_cache",
+    "get_memory_info",
+    "is_reasoning_model",
+    "load_model",
+    "release_memory",
+    "run_completion",
+    "run_function_completion",
+    "run_inference",
+    "run_inference_speculative",
+    "run_json_completion",
+    "run_source_completion",
+    "run_tool_completion",
+    "swap_adapters",
+]
 
 
-@dataclass
-class InferenceResult:
-    text: str  # full generated text (reasoning + answer)
-    reasoning: str
-    answer: str
-    elapsed: float
-    tokens_generated: int
-    tokens_per_sec: float
-    forced_answer: bool = False
-
-
-@dataclass
-class ModelHandle:
-    """A loaded MLX model + tokenizer, ready for inference."""
-
-    model: object
-    tokenizer: object
-    model_id: str
-    huggingface_id: str
-    precision: str
-    quantized: bool
-    adapter_path: Optional[str] = None
-    # cache dir for downloaded models
-    cache_dir: str = os.path.expanduser("~/.cache/iloptimus/models")
+def _backend_for(handle: ModelHandle):
+    return get_backend(handle.backend)
 
 
 def run_completion(
@@ -73,33 +79,27 @@ def run_completion(
     essential for tool JSON: a controller must receive the model's actual
     completion, not a fabricated ``The answer is`` continuation.
     """
-    import mlx.core as mx
-    from mlx_lm import generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-
+    backend = _backend_for(handle)
     messages = [{"role": "user", "content": prompt}]
     chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     started = time.time()
-    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
-    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
-    is_reasoning_model = "deepseek-r1" in handle.huggingface_id.lower()
+    is_reasoning = is_reasoning_model(handle)
     reasoning = ""
-    if is_reasoning_model:
+    if is_reasoning:
         # Agent prompts typically place the native tool JSON just after a
         # substantial reasoning trace. Preserve enough of that first pass to
         # reach the model's own closing tag; short conversational completions
         # still split evenly so they retain answer room.
         reasoning_budget = max(32, int(max_tokens * (0.75 if max_tokens >= 256 else 0.5)))
         answer_budget = max(32, max_tokens - reasoning_budget)
-        first = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=chat_text,
+        first = backend.generate(
+            handle,
+            chat_text,
             max_tokens=reasoning_budget,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            verbose=False,
-        ).strip()
+            temperature=temperature,
+            repetition_penalty=1.05,
+            repetition_context_size=128,
+        ).text.strip()
         if THINK_CLOSE in first:
             reasoning, text = first.split(THINK_CLOSE, 1)
             text = text.strip()
@@ -111,25 +111,23 @@ def run_completion(
             # Close that phase and let it emit the real answer or tool object. We
             # intentionally add no answer prefix or fabricated content.
             answer_prompt = chat_text + first + ("" if THINK_CLOSE in first else THINK_CLOSE) + "\n"
-            text = generate(
-                handle.model,
-                handle.tokenizer,
-                prompt=answer_prompt,
+            text = backend.generate(
+                handle,
+                answer_prompt,
                 max_tokens=answer_budget,
-                sampler=sampler,
-                logits_processors=logits_processors,
-                verbose=False,
-            ).strip()
+                temperature=temperature,
+                repetition_penalty=1.05,
+                repetition_context_size=128,
+            ).text.strip()
     else:
-        text = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=chat_text,
+        text = backend.generate(
+            handle,
+            chat_text,
             max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            verbose=False,
-        ).strip()
+            temperature=temperature,
+            repetition_penalty=1.05,
+            repetition_context_size=128,
+        ).text.strip()
     if THINK_CLOSE in text:
         extra_reasoning, text = text.rsplit(THINK_CLOSE, 1)
         reasoning = (reasoning + "\n" + extra_reasoning).strip()
@@ -141,7 +139,7 @@ def run_completion(
         tokens = len(handle.tokenizer.encode(reasoning + text))
     except Exception:
         tokens = max(1, len(text) // 4)
-    mx.clear_cache()
+    backend.clear_cache(handle)
     return InferenceResult(
         text=(reasoning + THINK_CLOSE + "\n" + text) if reasoning else text,
         reasoning=reasoning,
@@ -169,10 +167,7 @@ def run_tool_completion(
     constrained decoding: the model still authors every argument and file
     byte, while the harness guarantees the outer call shape.
     """
-    import mlx.core as mx
-    from mlx_lm import generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-
+    backend = _backend_for(handle)
     messages = [{"role": "user", "content": prompt}]
     chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     prefix = json.dumps({"tool_name": tool_name}, ensure_ascii=False)[:-1] + ', "arguments": {'
@@ -183,41 +178,37 @@ def run_tool_completion(
     if next_argument:
         encoded_prefix = json.dumps(next_argument_prefix, ensure_ascii=False)[1:-1]
         prefix += f'{json.dumps(next_argument)}: "{encoded_prefix}'
-    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
-    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
     reasoning = ""
-    if "deepseek-r1" in handle.huggingface_id.lower():
-        reasoning = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=chat_text,
+    if is_reasoning_model(handle):
+        reasoning = backend.generate(
+            handle,
+            chat_text,
             max_tokens=min(192, max(96, max_tokens // 2)),
-            sampler=sampler,
-            logits_processors=logits_processors,
-            verbose=False,
-        ).strip()
+            temperature=temperature,
+            repetition_penalty=1.05,
+            repetition_context_size=128,
+        ).text.strip()
         if THINK_CLOSE in reasoning:
             reasoning = reasoning.split(THINK_CLOSE, 1)[0].strip()
         generation_prompt = chat_text + reasoning + THINK_CLOSE + "\n" + prefix
     else:
         generation_prompt = chat_text + prefix
     started = time.time()
-    continuation = generate(
-        handle.model,
-        handle.tokenizer,
-        prompt=generation_prompt,
+    continuation = backend.generate(
+        handle,
+        generation_prompt,
         max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors,
-        verbose=False,
-    ).strip()
+        temperature=temperature,
+        repetition_penalty=1.05,
+        repetition_context_size=128,
+    ).text.strip()
     text = prefix + continuation
     elapsed = time.time() - started
     try:
         tokens = len(handle.tokenizer.encode(reasoning + continuation))
     except Exception:
         tokens = max(1, len(continuation) // 4)
-    mx.clear_cache()
+    backend.clear_cache(handle)
     return InferenceResult(
         text=text,
         reasoning=reasoning,
@@ -236,10 +227,7 @@ def run_source_completion(
     temperature: float = 0.1,
 ) -> InferenceResult:
     """Generate plain source text for a trusted write-file wrapper."""
-    import mlx.core as mx
-    from mlx_lm import generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-
+    backend = _backend_for(handle)
     language = {
         ".py": "python",
         ".html": "html",
@@ -270,34 +258,30 @@ def run_source_completion(
     chat_text = handle.tokenizer.apply_chat_template(
         [{"role": "user", "content": focused_prompt}], tokenize=False, add_generation_prompt=True
     )
-    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
-    logits_processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=128)
     reasoning = ""
-    if "deepseek-r1" in handle.huggingface_id.lower():
-        reasoning = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=chat_text,
+    if is_reasoning_model(handle):
+        reasoning = backend.generate(
+            handle,
+            chat_text,
             max_tokens=min(192, max(96, max_tokens // 2)),
-            sampler=sampler,
-            logits_processors=logits_processors,
-            verbose=False,
-        ).strip()
+            temperature=temperature,
+            repetition_penalty=1.05,
+            repetition_context_size=128,
+        ).text.strip()
         if THINK_CLOSE in reasoning:
             reasoning = reasoning.split(THINK_CLOSE, 1)[0].strip()
         generation_prompt = chat_text + reasoning + THINK_CLOSE + f"\n```{language}\n"
     else:
         generation_prompt = chat_text + f"```{language}\n"
     started = time.time()
-    source = generate(
-        handle.model,
-        handle.tokenizer,
-        prompt=generation_prompt,
+    source = backend.generate(
+        handle,
+        generation_prompt,
         max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors,
-        verbose=False,
-    ).strip()
+        temperature=temperature,
+        repetition_penalty=1.05,
+        repetition_context_size=128,
+    ).text.strip()
     if "```" in source:
         source = source.split("```", 1)[0].rstrip()
     elapsed = time.time() - started
@@ -305,7 +289,7 @@ def run_source_completion(
         tokens = len(handle.tokenizer.encode(reasoning + source))
     except Exception:
         tokens = max(1, len(source) // 4)
-    mx.clear_cache()
+    backend.clear_cache(handle)
     return InferenceResult(
         text=source,
         reasoning=reasoning,
@@ -329,10 +313,7 @@ def run_function_completion(
     reasoning section is closed immediately, and deterministic generation ends
     as soon as the requested function is structurally complete.
     """
-    import mlx.core as mx
-    from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-
+    backend = _backend_for(handle)
     from .artifact_composer import balanced_function_end
 
     focused_prompt = (
@@ -343,35 +324,29 @@ def run_function_completion(
         [{"role": "user", "content": focused_prompt}], tokenize=False, add_generation_prompt=True
     )
     prefix = f"function {function_name}(world) {{"
-    if "deepseek-r1" in handle.huggingface_id.lower():
+    if is_reasoning_model(handle):
         generation_prompt = chat_text + THINK_CLOSE + "\n```javascript\n" + prefix
     else:
         generation_prompt = chat_text + "```javascript\n" + prefix
-    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
-    processors = make_logits_processors(repetition_penalty=1.08, repetition_context_size=192)
-    stream = stream_generate(
-        handle.model,
-        handle.tokenizer,
-        prompt=generation_prompt,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=processors,
-    )
     started = time.time()
     source = prefix
     generated_tokens = 0
-    try:
-        for response in stream:
-            source += response.text
-            generated_tokens = int(response.generation_tokens)
-            bounds = balanced_function_end(source, function_name)
-            if bounds:
-                source = source[bounds[0] : bounds[1]]
-                break
-    finally:
-        stream.close()
+    for chunk in backend.stream_generate(
+        handle,
+        generation_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        repetition_penalty=1.08,
+        repetition_context_size=192,
+    ):
+        source += chunk.text
+        generated_tokens = max(generated_tokens, chunk.generation_tokens)
+        bounds = balanced_function_end(source, function_name)
+        if bounds:
+            source = source[bounds[0] : bounds[1]]
+            break
     elapsed = time.time() - started
-    mx.clear_cache()
+    backend.clear_cache(handle)
     return InferenceResult(
         text=source.strip(),
         reasoning="",
@@ -389,54 +364,57 @@ def run_json_completion(
     temperature: float = 0.0,
 ) -> InferenceResult:
     """Generate one JSON object without spending tokens on a reasoning pass."""
-    import mlx.core as mx
-    from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-
+    backend = _backend_for(handle)
     chat_text = handle.tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt + "\nReturn one JSON object only."}],
         tokenize=False,
         add_generation_prompt=True,
     )
-    generation_prompt = chat_text + (THINK_CLOSE + "\n" if "deepseek-r1" in handle.huggingface_id.lower() else "") + "{"
-    sampler = make_sampler(temp=temperature, top_p=0.9) if temperature > 0 else make_sampler(temp=0)
-    processors = make_logits_processors(repetition_penalty=1.05, repetition_context_size=192)
-    stream = stream_generate(
-        handle.model,
-        handle.tokenizer,
-        prompt=generation_prompt,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=processors,
-    )
+    # Reasoning-distilled models (DeepSeek-R1 and its derivatives like BoostedV1)
+    # generate  IMD... blocks before the answer. Prepend the think-close
+    # token so the model skips reasoning and outputs JSON directly.
+    generation_prompt = chat_text + (THINK_CLOSE + "\n" if is_reasoning_model(handle) else "") + "{"
     started = time.time()
     text = "{"
     generated_tokens = 0
     depth = 1
     quote = False
     escaped = False
-    try:
-        for response in stream:
-            text += response.text
-            generated_tokens = int(response.generation_tokens)
-            for char in response.text:
-                if escaped:
-                    escaped = False
-                elif char == "\\" and quote:
-                    escaped = True
-                elif char == '"':
-                    quote = not quote
-                elif not quote and char == "{":
-                    depth += 1
-                elif not quote and char == "}":
-                    depth -= 1
-            if depth <= 0:
-                text = text[: text.rfind("}") + 1]
-                break
-    finally:
-        stream.close()
+    first_token = True
+    for chunk in backend.stream_generate(
+        handle,
+        generation_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        repetition_penalty=1.05,
+        repetition_context_size=192,
+    ):
+        piece = chunk.text
+        # Small models often echo the opening brace that was already
+        # prepended to the prompt, producing "{{". Skip a leading "{".
+        if first_token:
+            first_token = False
+            piece = piece.lstrip()
+            if piece.startswith("{"):
+                piece = piece[1:]
+        text += piece
+        generated_tokens = max(generated_tokens, chunk.generation_tokens)
+        for char in piece:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote:
+                escaped = True
+            elif char == '"':
+                quote = not quote
+            elif not quote and char == "{":
+                depth += 1
+            elif not quote and char == "}":
+                depth -= 1
+        if depth <= 0:
+            text = text[: text.rfind("}") + 1]
+            break
     elapsed = time.time() - started
-    mx.clear_cache()
+    backend.clear_cache(handle)
     return InferenceResult(
         text=text.strip(),
         reasoning="",
@@ -447,63 +425,6 @@ def run_json_completion(
     )
 
 
-def _local_model_path(hf_id: str, precision: str, cache_dir: str) -> Path:
-    """Get the local path where a converted model should be stored."""
-    safe_name = hf_id.replace("/", "_")
-    suffix = f"_{precision}" if precision != "fp16" else ""
-    return Path(cache_dir) / f"{safe_name}{suffix}"
-
-
-# In-memory cache of mlx-community repo lookups to avoid repeated network calls
-_mlx_repo_cache: dict[str, Optional[str]] = {}
-
-
-def _mlx_community_repo(huggingface_id: str, precision: str) -> Optional[str]:
-    """Derive the mlx-community pre-quantized repo name for a model.
-
-    mlx-community publishes pre-quantized MLX models following the naming
-    convention: mlx-community/{ModelName}-{bits}bit (e.g.
-    mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit). Loading these directly
-    avoids the slow download-full-model + local-convert step.
-
-    Returns the mlx-community repo id, or None if precision is fp16 or the
-    model name can't be mapped.
-    """
-    if precision not in ("int4", "int8", "int3", "int6"):
-        return None
-    bits = {"int3": "3", "int4": "4", "int6": "6", "int8": "8"}[precision]
-    model_name = huggingface_id.split("/")[-1]
-    return f"mlx-community/{model_name}-{bits}bit"
-
-
-def _set_mlx_memory_limits():
-    """Set conservative MLX memory limits for 8GB Apple Silicon."""
-    import mlx.core as mx
-
-    if mx.metal.is_available():
-        try:
-            mx.set_memory_limit(int(3.5 * 1024**3))
-            mx.set_cache_limit(int(1.0 * 1024**3))
-            mx.set_wired_limit(int(3.5 * 1024**3))
-        except Exception:
-            try:
-                mx.metal.set_memory_limit(int(3.5 * 1024**3))
-                mx.metal.set_cache_limit(int(1.0 * 1024**3))
-                mx.metal.set_wired_limit(int(3.5 * 1024**3))
-            except Exception:
-                pass
-
-
-def release_memory() -> None:
-    """Release unreferenced MLX allocations before switching workloads."""
-    import gc
-
-    import mlx.core as mx
-
-    gc.collect()
-    mx.clear_cache()
-
-
 def load_model(
     huggingface_id: str,
     precision: str = "int4",
@@ -511,200 +432,56 @@ def load_model(
     cache_dir: Optional[str] = None,
     dequantize: bool = False,
     source_override: Optional[str] = None,
+    backend: Optional[str] = None,
 ) -> ModelHandle:
-    """Load an MLX model from HuggingFace.
+    """Load a model via the active backend.
 
-    Strategy (fastest first):
-    1. If a pre-quantized mlx-community version exists, load it directly — no
-       conversion needed, download is ~3x smaller.
-    2. Otherwise, download the full HF model and convert to MLX quantized
-       format locally (cached so subsequent loads are fast).
-
-    If adapter_path is given, loads LoRA adapters on top of the base model.
-
-    dequantize is kept for backward compatibility but is no longer needed —
-    MLX's QuantizedLinear supports gradients natively (QLoRA), so LoRA
-    training works directly on int4 models without dequantization.
+    ``backend`` selects the implementation (``"mlx"`` or ``"vllm"``); when
+    omitted it is resolved from the detected hardware. The MLX backend supports
+    a ``dequantize`` legacy path; the vLLM backend ignores it (QLoRA on CUDA
+    uses bitsandbytes NF4 directly).
     """
-    import gc
+    from .backends import resolve_backend
 
-    import mlx.core as mx
-    import mlx_lm
-
-    gc.collect()
-    mx.clear_cache()
-    _set_mlx_memory_limits()
-
-    cache_dir = cache_dir or os.path.expanduser("~/.cache/iloptimus/models")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    local_path = _local_model_path(huggingface_id, precision, cache_dir)
-    quantized = precision in ("int4", "int8")
-    q_bits = 4 if precision == "int4" else 8
-
-    # ---- Try pre-quantized mlx-community model first (fast path) ----
-    mlx_repo = _mlx_community_repo(huggingface_id, precision)
-    load_source: str | None = source_override
-
-    if load_source is None and mlx_repo and not local_path.exists():
-        # Check in-memory cache first
-        cache_key = f"{huggingface_id}_{precision}"
-        if cache_key in _mlx_repo_cache:
-            load_source = _mlx_repo_cache[cache_key]
-        elif os.environ.get("HF_HUB_OFFLINE") == "1":
-            # Offline mode: try loading directly from cache — if the mlx-community
-            # model is cached, mlx_lm.load will find it; if not, it'll error
-            # and we fall through to the local convert path
-            try:
-                from huggingface_hub import try_to_load_from_cache
-
-                cached = try_to_load_from_cache(mlx_repo, "config.json")
-                if cached is not None and os.path.exists(cached):
-                    load_source = mlx_repo
-                    print(f"Using cached pre-quantized model: {mlx_repo}")
-            except Exception:
-                pass
-            _mlx_repo_cache[cache_key] = load_source
-        else:
-            from huggingface_hub import HfApi
-
-            api = HfApi()
-            try:
-                api.model_info(mlx_repo)
-                print(f"Found pre-quantized model: {mlx_repo} (loading directly, no conversion)")
-                load_source = mlx_repo
-            except Exception:
-                load_source = None
-            _mlx_repo_cache[cache_key] = load_source
-
-    # ---- Fall back to download + local convert ----
-    if load_source is None and not local_path.exists():
-        from mlx_lm import convert
-
-        print(f"Downloading and converting {huggingface_id} to MLX ({precision})...")
-        t0 = time.time()
-        convert(
-            hf_path=huggingface_id,
-            mlx_path=str(local_path),
-            quantize=quantized,
-            q_bits=q_bits,
-        )
-        print(f"Converted in {time.time() - t0:.1f}s -> {local_path}")
-        load_source = str(local_path)
-    elif load_source is None and local_path.exists():
-        load_source = str(local_path)
-
-    # Load the model
-    print(f"Loading model from {load_source}...")
-    t0 = time.time()
-    model, tokenizer = mlx_lm.load(load_source)
-    print(f"Model loaded in {time.time() - t0:.1f}s")
-
-    # Dequantize only if explicitly requested (legacy path — QLoRA makes this unnecessary)
-    if dequantize and quantized:
-        _dequantize_model(model)
-        quantized = False
-        print("Model dequantized to fp16 in memory (legacy path — QLoRA is preferred)")
-
-    # Load LoRA adapter if provided
-    if adapter_path and os.path.exists(adapter_path):
-        from mlx_lm.tuner.utils import load_adapters
-
-        print(f"Loading LoRA adapters from {adapter_path}...")
-        load_adapters(model, adapter_path)
-        print("Adapters loaded")
-
-    return ModelHandle(
-        model=model,
-        tokenizer=tokenizer,
-        model_id=huggingface_id.split("/")[-1],
+    name = resolve_backend(preferred=backend) if backend else resolve_backend()
+    impl = get_backend(name)
+    handle = impl.load(
         huggingface_id=huggingface_id,
-        precision="fp16" if dequantize else precision,
-        quantized=quantized,
+        precision=precision,
         adapter_path=adapter_path,
         cache_dir=cache_dir,
+        source_override=source_override,
     )
+    # Legacy dequantize hook (MLX-only). QLoRA makes this unnecessary on both
+    # backends, but it is kept for backward compatibility.
+    if dequantize and name == "mlx" and handle.quantized:
+        impl._dequantize_model(handle.model)  # type: ignore[attr-defined]
+        handle.quantized = False
+        handle.precision = "fp16"
+        print("Model dequantized to fp16 in memory (legacy path — QLoRA is preferred)")
+    return handle
 
 
 def swap_adapters(model: object, adapter_path: str | None) -> object:
     """Swap LoRA adapters without reloading the base model.
 
-    Removes existing LoRA layers and loads new ones in-place. This avoids
-    the expensive model reload cycle (~15s per reload) when switching between
-    baseline, SFT, and GRPO adapters.
+    Accepts either a :class:`ModelHandle` (preferred) or a raw MLX model
+    (legacy callers may pass ``handle.model``). When given a raw model, this
+    falls back to the MLX backend's adapter swap.
     """
-    import mlx.core as mx
-    from mlx_lm.tuner.utils import load_adapters
-
-    # Remove existing LoRA adapters if present
-    has_lora = any("lora" in k.lower() for k, _ in model.named_modules())
-    if has_lora:
-        from mlx_lm.tuner.utils import remove_lora_layers
-
-        model = remove_lora_layers(model)
-        mx.eval(model.parameters())
-        mx.clear_cache()
-
-    # Load new adapters if provided
-    if adapter_path and os.path.exists(adapter_path):
-        load_adapters(model, adapter_path)
-        mx.eval(model.parameters())
-        print(f"Swapped to adapters: {adapter_path}")
-
-    return model
-
-
-def _dequantize_model(model):
-    """Replace all QuantizedLinear/QuantizedEmbedding layers with regular ones.
-
-    Legacy path — QLoRA (training directly on int4) is preferred and does not
-    require this. Kept for backward compatibility.
-
-    Memory-safe: materializes each dequantized weight with mx.eval() and clears
-    the MLX cache after every layer replacement so the old int4 weights are
-    freed before the next layer is processed.
-    """
-    import mlx.core as mx
-    import mlx.nn as nn
-
-    def _replace(module):
-        for k, v in list(module.items()):
-            if isinstance(v, nn.QuantizedLinear):
-                w, scales = v.weight, v.scales
-                biases = v.biases if hasattr(v, "biases") else None
-                out_dims = w.shape[0]
-                in_dims = w.shape[1] * 8
-                group_size = in_dims // scales.shape[1]
-                deq_w = mx.dequantize(w, scales=scales, biases=biases, group_size=group_size, bits=4)
-                mx.eval(deq_w)
-                new = nn.Linear(in_dims, out_dims, bias=True)
-                new.weight = deq_w
-                if hasattr(v, "bias") and v.bias is not None:
-                    new.bias = v.bias
-                module[k] = new
-                del w, scales, deq_w, v
-                mx.clear_cache()
-            elif isinstance(v, nn.QuantizedEmbedding):
-                w, scales = v.weight, v.scales
-                biases = v.biases if hasattr(v, "biases") else None
-                num_emb = w.shape[0]
-                emb_dim = w.shape[1] * 8
-                group_size = emb_dim // scales.shape[1]
-                deq_w = mx.dequantize(w, scales=scales, biases=biases, group_size=group_size, bits=4)
-                mx.eval(deq_w)
-                new = nn.Embedding(num_emb, emb_dim)
-                new.weight = deq_w
-                module[k] = new
-                del w, scales, deq_w, v
-                mx.clear_cache()
-            elif hasattr(v, "items") and not isinstance(v, (nn.Linear, nn.Embedding)):
-                _replace(v)
-
-    _replace(model)
-    _replace(model.model)
-    for layer in model.model.layers:
-        _replace(layer)
-    mx.clear_cache()
+    if isinstance(model, ModelHandle):
+        return _backend_for(model).swap_adapters(model, adapter_path).model
+    # Legacy raw-model path: assume MLX.
+    handle = ModelHandle(
+        model=model,
+        tokenizer=None,  # type: ignore[arg-type]
+        model_id="",
+        huggingface_id="",
+        precision="int4",
+        quantized=True,
+        backend="mlx",
+    )
+    return _backend_for(handle).swap_adapters(handle, adapter_path).model
 
 
 def run_inference_speculative(
@@ -730,80 +507,35 @@ def run_inference_speculative(
     output copies heavily from the input context. For novel reasoning text
     (e.g. DeepSeek-R1 thinking traces), n-gram matches are rare and the
     wider verify passes cost more than they save — use run_inference instead.
+
+    Only the MLX backend implements speculative decoding; the vLLM backend
+    ignores the speculative parameters and runs normal two-stage inference
+    (vLLM's own speculative decoding is configured at engine init time).
     """
-    from mlx_dspark import lookup_generate
-    from mlx_dspark.target import Target
-
-    messages = [{"role": "user", "content": prompt}]
-    chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    t0 = time.time()
-
-    # Wrap our loaded model (may have LoRA adapters) in a dspark Target
-    target = Target(handle.model, handle.tokenizer)
-
-    # Single-pass generation with stop at think-close + EOS.
-    # The chat template already includes  in the prompt, so the model's
-    # output starts directly with reasoning text.
-    total_max_tokens = max_reasoning_tokens + max_answer_tokens
-    result = lookup_generate(
-        target,
-        handle.tokenizer,
-        prompt=chat_text,
-        max_new_tokens=total_max_tokens,
-        max_draft_tokens=max_draft_tokens,
-        long_draft_tokens=long_draft_tokens,
-        ngram_min=ngram_min,
-        ngram_max=ngram_max,
-        temperature=temperature if temperature > 0 else 0.0,
-        top_p=top_p,
-        apply_chat_template=False,
-        stop=[THINK_CLOSE, EOS],
-    )
-
-    raw_text = result.text
-    if EOS in raw_text:
-        raw_text = raw_text.replace(EOS, "")
-
-    elapsed = time.time() - t0
-
-    # Split into reasoning and answer
-    forced = False
-    if THINK_CLOSE in raw_text:
-        reasoning, answer = raw_text.split(THINK_CLOSE, 1)
-        reasoning = reasoning.strip()
-        answer = answer.strip()
-    else:
-        # No think-close — reasoning consumed the budget. Force an answer.
-        reasoning = raw_text.strip()
-        forced = True
-        from mlx_lm import generate
-
-        forced_prompt = chat_text + raw_text + THINK_CLOSE + "\n<answer>The answer is "
-        out2 = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=forced_prompt,
-            max_tokens=max_answer_tokens,
-            verbose=False,
+    backend = _backend_for(handle)
+    if handle.backend == "mlx":
+        return backend.run_two_stage_inference(  # type: ignore[attr-defined]
+            handle,
+            prompt,
+            max_reasoning_tokens=max_reasoning_tokens,
+            max_answer_tokens=max_answer_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            speculative=True,
+            speculative_config={
+                "max_draft_tokens": max_draft_tokens,
+                "long_draft_tokens": long_draft_tokens,
+                "ngram_min": ngram_min,
+                "ngram_max": ngram_max,
+            },
         )
-        out2 = out2.strip()
-        if EOS in out2:
-            out2 = out2.replace(EOS, "").strip()
-        answer = out2
-
-    full_text = reasoning + THINK_CLOSE + "\n" + answer
-    total_tokens = len(result.token_ids)
-    tps = total_tokens / elapsed if elapsed > 0 else 0.0
-
-    return InferenceResult(
-        text=full_text,
-        reasoning=reasoning,
-        answer=answer,
-        elapsed=elapsed,
-        tokens_generated=total_tokens,
-        tokens_per_sec=tps,
-        forced_answer=forced,
+    return backend.run_two_stage_inference(
+        handle,
+        prompt,
+        max_reasoning_tokens=max_reasoning_tokens,
+        max_answer_tokens=max_answer_tokens,
+        temperature=temperature,
+        top_p=top_p,
     )
 
 
@@ -819,161 +551,46 @@ def run_inference(
 ) -> InferenceResult:
     """Run two-stage inference: reasoning then answer.
 
-    Uses generate_step with a persistent KV cache so the answer stage
-    continues from where reasoning left off — no reprocessing of the prompt
-    or reasoning tokens. Early-stops when the think-close token is emitted.
-
-    If speculative=True, uses prompt-lookup speculative decoding (mlx-dspark)
-    for lossless speedup on copy-heavy text. See run_inference_speculative
-    for details and trade-offs.
+    Delegates to the active backend's ``run_two_stage_inference``. The MLX
+    backend shares a persistent KV cache between stages; the vLLM backend
+    generates in a single pass and splits on the think-close token. If
+    ``speculative=True`` and the MLX backend is active, prompt-lookup
+    speculative decoding (mlx-dspark) is used for lossless speedup on
+    copy-heavy text.
     """
-    if speculative:
-        config = speculative_config or {}
-        return run_inference_speculative(
-            handle,
-            prompt,
-            max_reasoning_tokens=max_reasoning_tokens,
-            max_answer_tokens=max_answer_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            **config,
-        )
-
-    import mlx.core as mx
-    from mlx_lm.generate import generate_step
-    from mlx_lm.models.cache import make_prompt_cache
-    from mlx_lm.sample_utils import make_sampler
-
-    messages = [{"role": "user", "content": prompt}]
-    chat_tokens = handle.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-
-    t0 = time.time()
-
-    # Create a persistent KV cache shared between reasoning and answer stages
-    prompt_cache = make_prompt_cache(handle.model)
-    prompt_arr = mx.array(chat_tokens)
-
-    # Determine stop tokens
-    eos_token_id = handle.tokenizer.eos_token_id
-
-    # Single generate_step call for reasoning + answer — the KV cache
-    # flows naturally from reasoning to answer without reprocessing.
-    # We track the think-close token to split the output.
-    sampler = make_sampler(temp=temperature, top_p=top_p) if temperature > 0 else make_sampler(temp=0)
-    all_tokens = []
-    reasoning_tokens = []
-    answer_tokens = []
-    think_done = False
-    forced = False
-
-    total_max_tokens = max_reasoning_tokens + max_answer_tokens
-
-    for token_id, logprobs in generate_step(
-        prompt_arr,
-        handle.model,
-        max_tokens=total_max_tokens,
-        sampler=sampler,
-        prompt_cache=prompt_cache,
-    ):
-        all_tokens.append(token_id)
-
-        if not think_done:
-            reasoning_tokens.append(token_id)
-            if token_id == THINK_CLOSE_TOKEN_ID or token_id == eos_token_id:
-                think_done = True
-                if len(all_tokens) >= max_reasoning_tokens:
-                    forced = True
-            # Reasoning budget exhausted without think-close — stop and force answer
-            elif len(reasoning_tokens) >= max_reasoning_tokens:
-                think_done = True
-                forced = True
-                break  # CRITICAL: stop generating, use forced prompt for answer
-        else:
-            answer_tokens.append(token_id)
-            if token_id == eos_token_id:
-                break
-            if len(answer_tokens) >= max_answer_tokens:
-                break
-
-    reasoning_text = handle.tokenizer.decode(reasoning_tokens)
-    if EOS in reasoning_text:
-        reasoning_text = reasoning_text.replace(EOS, "").strip()
-
-    if forced:
-        # Reasoning budget exhausted without think-close — generate answer
-        # from scratch with a forced think-close tag
-        from mlx_lm import generate
-
-        chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        forced_prompt = chat_text + reasoning_text + THINK_CLOSE + "\n<answer>The answer is "
-        out2 = generate(
-            handle.model,
-            handle.tokenizer,
-            prompt=forced_prompt,
-            max_tokens=max_answer_tokens,
-            verbose=False,
-        )
-        out2 = out2.strip()
-        if EOS in out2:
-            out2 = out2.replace(EOS, "").strip()
-        full_text = reasoning_text + THINK_CLOSE + "\n<answer>The answer is " + out2 + "</answer>"
-    else:
-        answer_text = handle.tokenizer.decode(answer_tokens)
-        if EOS in answer_text:
-            answer_text = answer_text.replace(EOS, "").strip()
-        full_text = reasoning_text + answer_text
-
-    elapsed = time.time() - t0
-    mx.clear_cache()
-
-    # Split into reasoning and answer
-    if THINK_CLOSE in full_text:
-        reasoning, answer = full_text.split(THINK_CLOSE, 1)
-        reasoning = reasoning.strip()
-        answer = answer.strip()
-    else:
-        reasoning = ""
-        answer = full_text
-
-    # Estimate token count (rough: 1 token ~ 4 chars)
-    tokens_generated = len(full_text) // 4
-    tps = tokens_generated / elapsed if elapsed > 0 else 0.0
-
-    return InferenceResult(
-        text=full_text,
-        reasoning=reasoning,
-        answer=answer,
-        elapsed=elapsed,
-        tokens_generated=tokens_generated,
-        tokens_per_sec=tps,
-        forced_answer=forced,
+    backend = _backend_for(handle)
+    return backend.run_two_stage_inference(
+        handle,
+        prompt,
+        max_reasoning_tokens=max_reasoning_tokens,
+        max_answer_tokens=max_answer_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        speculative=speculative,
+        speculative_config=speculative_config,
     )
 
 
 def get_memory_info() -> dict:
-    """Get current MLX memory usage info."""
+    """Get current backend memory usage info (best-effort across backends)."""
+    # No handle available — report MLX info if present (legacy callers).
     try:
-        import mlx.core as mx
-
-        info = {}
-        if hasattr(mx, "get_peak_memory"):
-            info["peak_memory_gb"] = mx.get_peak_memory() / 1e9
-        elif hasattr(mx, "metal") and mx.metal.is_available():
-            info["peak_memory_gb"] = mx.metal.get_peak_memory() / 1e9
-        if hasattr(mx, "get_active_memory"):
-            info["active_memory_gb"] = mx.get_active_memory() / 1e9
-        elif hasattr(mx, "metal") and mx.metal.is_available():
-            info["active_memory_gb"] = mx.metal.get_active_memory() / 1e9
-        return info
-    except ImportError:
+        return get_backend("mlx").get_memory_info()
+    except Exception:
         return {}
 
 
-def clear_cache():
-    """Clear MLX cache to free memory."""
+def clear_cache() -> None:
+    """Clear backend caches to free memory (best-effort across backends)."""
     try:
-        import mlx.core as mx
+        get_backend("mlx").clear_cache(None)
+    except Exception:
+        pass
 
-        mx.clear_cache()
-    except ImportError:
+
+def release_memory() -> None:
+    """Release unreferenced allocations before switching workloads."""
+    try:
+        get_backend("mlx").release_memory()
+    except Exception:
         pass

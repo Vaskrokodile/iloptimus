@@ -8,8 +8,17 @@ dependencies = [
     "uvicorn>=0.30.0",
     "pydantic>=2.0.0",
     "psutil>=5.9.0",
+    # Apple Silicon path: MLX for inference + LoRA/QLoRA training.
     "mlx-lm>=0.31.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-dspark>=0.7.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # NVIDIA/CUDA path: HF Transformers + PEFT for LoRA/QLoRA training and
+    # logprob computation. vLLM itself is an optional extra (linux only) because
+    # it is heavy and CUDA-specific; the vllm backend lazily imports it.
+    "torch>=2.3.0; sys_platform == 'linux'",
+    "transformers>=4.45.0; sys_platform == 'linux'",
+    "peft>=0.11.0; sys_platform == 'linux'",
+    "accelerate>=0.34.0; sys_platform == 'linux'",
+    "safetensors>=0.4.0; sys_platform == 'linux'",
     "huggingface-hub>=0.24.0",
     "numpy>=1.24.0",
     "mcp>=1.27,<2",
@@ -17,6 +26,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# vLLM gives the CUDA backend high-throughput batched inference. Install with
+# `uv pip install 'iloptimus[cuda]'` on a Linux machine with NVIDIA GPUs.
+cuda = [
+    "vllm>=0.6.0; sys_platform == 'linux'",
+    "bitsandbytes>=0.43.0; sys_platform == 'linux'",
+]
+# Legacy alias kept for backward compatibility.
 vllm = ["vllm>=0.6.0; sys_platform == 'linux'"]
 dev = ["pytest>=8.0.0", "ruff>=0.12.0"]
 

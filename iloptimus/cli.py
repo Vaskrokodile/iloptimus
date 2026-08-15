@@ -87,8 +87,16 @@ def main():
             print()
             if hw.recommended_backend == "mlx" and hw.mlx_available:
                 print("Ready: local download, chat, IL, and GRPO training are available through MLX.")
+            elif hw.recommended_backend == "vllm" and (hw.vllm_available or hw.torch_available):
+                print(
+                    "Ready: local download, chat, IL, and GRPO training are available through "
+                    "vLLM + HuggingFace Transformers + PEFT."
+                )
             else:
-                print("Not ready for training: IL Optimus 0.2 currently requires Apple Silicon with MLX.")
+                print(
+                    "Not ready for training: IL Optimus needs Apple Silicon (MLX) or an NVIDIA CUDA GPU "
+                    "(vLLM / PyTorch)."
+                )
                 raise SystemExit(2)
         return
 

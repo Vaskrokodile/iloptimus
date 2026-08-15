@@ -6,9 +6,10 @@ and tracks training runs in real time.
 
 ## Install and Start
 
-> **Requires Apple Silicon (M1/M2/M3/M4)** — the pipeline uses MLX for
-> inference and LoRA fine-tuning. CUDA/vLLM support is detected but not yet
-> implemented in the training path.
+> **Requires Apple Silicon (M1/M2/M3/M4) or an NVIDIA CUDA GPU.** The pipeline
+> runs on two local accelerator backends: **MLX** on Apple Silicon and
+> **vLLM + HuggingFace Transformers + PEFT** on NVIDIA CUDA. The active backend
+> is auto-detected from your hardware.
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
@@ -270,14 +271,32 @@ uv run iloptimus version            # Print version
 
 ## Backends
 
+IL Optimus auto-detects your accelerator and selects one of two local
+backends. Both implement the same `Backend` interface
+(`iloptimus/core/backends/base.py`) so the pipeline, inference orchestration,
+SFT data generation, and GRPO advantage computation are shared across
+backends — only the primitives that genuinely differ (loading, generation,
+logprob computation, training) are backend-specific.
+
 - **MLX** (Apple Silicon) — uses `mlx_lm` for inference and compiled
   LoRA/QLoRA fine-tuning with cached tokenization, stable length buckets,
-  prompt masking, selected attention targets, and hardware-budgeted steps.
-  **This is the only backend currently implemented.**
+  prompt masking, frozen-prefix caching, selected attention targets, and
+  hardware-budgeted steps. QLoRA trains directly on int4 quantized weights.
   Recommended for M-series Macs with unified memory.
-- **CUDA / CPU** — hardware is detected and reported, but release 0.2 refuses
-  to claim model download or training support on these backends. They remain a
-  future backend instead of silently falling back to simulated behavior.
+- **vLLM + HuggingFace Transformers + PEFT** (NVIDIA CUDA) — uses `vllm` for
+  high-throughput batched inference (with on-the-fly LoRA serving via
+  `LoRARequest`) and HuggingFace Transformers + PEFT for LoRA/QLoRA SFT
+  (4-bit NF4 via bitsandbytes) and a custom GRPO loop. When `vllm` is not
+  installed, inference falls back to `model.generate` so the backend still
+  works on a torch-only CUDA box. Recommended for NVIDIA GPUs with >= 8GB VRAM.
+
+Install the CUDA extras on Linux:
+
+```bash
+uv pip install -e ".[cuda]"      # torch, transformers, peft, accelerate, bitsandbytes, vllm
+```
+
+The MLX extras are installed by default on macOS and are darwin-only.
 
 ## License
 

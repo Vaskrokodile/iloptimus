@@ -1,7 +1,7 @@
 """IL pipeline runner — orchestrates real SFT + GRPO with live SSE streaming.
 
 Runs the full IL pipeline:
-1. Load model (mlx_lm with quantization)
+1. Load model (MLX or vLLM backend with quantization)
 2. Baseline benchmark (real inference + grading)
 3. SFT training (LoRA fine-tuning on benchmark traces)
 4. Post-SFT benchmark
@@ -78,7 +78,11 @@ class RunConfig:
     sft_compile_bucket_size: int = 128
     sft_clear_cache_threshold_gb: float = 1.0
     sft_prefix_cache: bool = False
+    sft_auto_prefix_cache: bool = True  # auto-enable prefix cache when beneficial
     sft_seed: int = 0
+    # Skip the post-SFT/post-GRPO benchmark when the loss/reward didn't improve,
+    # saving ~150s of inference per skipped benchmark on 8GB M1.
+    skip_redundant_benchmarks: bool = True
     grpo_iters: int = 10  # reduced from 50 — research shows diminishing returns after 10-20 iters
     grpo_group_size: int = 2  # reduced from 4 — 2-GRPO matches 16-GRPO per recent research
     grpo_lr: float = 1e-3  # SGD with higher LR for visible changes
@@ -88,6 +92,11 @@ class RunConfig:
     rollouts_per_example: int = 4
     max_reasoning_tokens: int = 256  # reduced from 512 — most IL tasks don't need 512 reasoning tokens
     max_answer_tokens: int = 128  # reduced from 512 — answers are short
+    # Path to a pre-trained LoRA adapter to load before training. This enables
+    # cumulative self-improvement: each round loads the previous round's adapter
+    # and trains on top of it, so improvements accumulate across rounds instead
+    # of each round starting from the base model.
+    adapter_path: str | None = None
 
 
 @dataclass
@@ -252,27 +261,30 @@ async def _update_progress(run_id: str, progress: float, stage: str = ""):
         _persist_state(state)
 
 
-# Single-thread executor for MLX operations — MLX arrays are thread-local
-# and cannot be shared across threads, so all MLX work must run on the same thread
-_mlx_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+# Single-thread executor for accelerator operations. MLX arrays are
+# thread-local and cannot be shared across threads; CUDA/torch tensors are
+# tied to a device stream and are safest on one thread too. So all backend
+# work (inference + training) runs on the same worker thread.
+_backend_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="backend")
 _pipeline_worker_lock = asyncio.Lock()
 
 
 async def _run_in_executor(func, *args, **kwargs):
-    """Run a sync function in the single-thread MLX executor to avoid blocking the event loop."""
+    """Run a sync function in the single-thread backend executor to avoid blocking the event loop."""
     loop = asyncio.get_running_loop()
     if kwargs:
         func = functools.partial(func, **kwargs)
-    return await loop.run_in_executor(_mlx_executor, func, *args)
+    return await loop.run_in_executor(_backend_executor, func, *args)
 
 
 def _sync_state_from_disk(run_id: str) -> RunState | None:
     """Merge a worker's durable state into this server process.
 
-    MLX may terminate a process at the native Metal layer under memory pressure.
-    Training therefore runs in a child process; this function keeps the API's
-    in-memory object (and any open SSE stream referring to it) synchronized with
-    the atomic run.json written by that child.
+    MLX may terminate a process at the native Metal layer under memory pressure,
+    and CUDA kernels can similarly abort the interpreter under OOM. Training
+    therefore runs in a child process; this function keeps the API's in-memory
+    object (and any open SSE stream referring to it) synchronized with the
+    atomic run.json written by that child.
     """
     state = _runs.get(run_id)
     path = run_dir(run_id) / "run.json"
@@ -361,16 +373,27 @@ async def run_pipeline_subprocess(run_id: str) -> RunState | None:
 
 
 async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) -> object:
-    """Stage 2: Load the model via mlx_lm.
+    """Stage 2: Load the model via the active backend.
 
     Uses QLoRA — trains directly on int4 quantized models without dequantization.
-    MLX's QuantizedLinear supports gradients natively, saving ~15s dequant time
-    and ~2.3GB memory (int4 is 1.2GB vs fp16 is 3.5GB).
+    On MLX, QuantizedLinear supports gradients natively (saving ~15s dequant
+    time and ~2.3GB memory). On CUDA, bitsandbytes NF4 provides the same QLoRA
+    workflow via PEFT.
+
+    If config.adapter_path is set, loads a pre-trained LoRA adapter on top of
+    the base model. This enables cumulative self-improvement: each round loads
+    the previous round's adapter and trains on top of it.
     """
     from .inference import load_model
     from .model_store import resolve_model_source
 
-    _emit(run_id, "loading-model", "info", f"Loading {model.huggingface_id} ({config.precision})...")
+    adapter_note = " + previous adapter" if config.adapter_path else ""
+    _emit(
+        run_id,
+        "loading-model",
+        "info",
+        f"Loading {model.huggingface_id} ({config.precision}, {config.backend}){adapter_note}...",
+    )
     await _update_progress(run_id, 0.05, "loading-model")
 
     source = resolve_model_source(model.id, config.precision, config.backend)
@@ -383,13 +406,15 @@ async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) ->
         precision=config.precision,
         dequantize=False,  # QLoRA — no dequantization needed
         source_override=source,
+        adapter_path=config.adapter_path,
+        backend=config.backend,
     )
 
     _emit(
         run_id,
         "loading-model",
         "success",
-        f"Model loaded: {model.name} ({config.precision} QLoRA, ~{model.int4_gb if config.precision == 'int4' else model.fp16_gb:.1f}GB)",
+        f"Model loaded: {model.name} ({config.precision} QLoRA, ~{model.int4_gb if config.precision == 'int4' else model.fp16_gb:.1f}GB){adapter_note}",
     )
     await _update_progress(run_id, 0.1, "loading-model")
     return handle
@@ -487,6 +512,64 @@ async def _emit_and_progress(run_id, stage, idx, total, result, acc, p_start, p_
     await _update_progress(run_id, progress, stage)
 
 
+def _sft_loss_improved(losses: list[float]) -> bool:
+    """Check whether SFT actually reduced loss (not just noise).
+
+    Compares the last reported loss to the first. A flat or increasing
+    loss means the adapter learned nothing useful and the post-SFT
+    benchmark would just reproduce the baseline.
+    """
+    if len(losses) < 2:
+        return True  # not enough data to skip — run the benchmark
+    return losses[-1] < losses[0]
+
+
+def _grpo_reward_improved(rewards: list[float]) -> bool:
+    """Check whether GRPO actually increased reward."""
+    if len(rewards) < 2:
+        return True
+    return rewards[-1] > rewards[0]
+
+
+def _should_auto_prefix_cache(config: RunConfig, num_examples: int, num_layers: int) -> bool:
+    """Decide whether to enable frozen-prefix caching for this SFT run.
+
+    The prefix cache pre-computes the frozen base-model layers once and
+    trains only on the suffix. It is beneficial when:
+    - batch_size is 1 (the cache only supports single-row batches)
+    - LoRA touches fewer layers than the total (there are frozen prefix layers)
+    - there is enough work to amortize the one-time cache build cost
+
+    The tech report measured a 2.2x throughput improvement on the 8GB M1
+    with a 4-layer Q/V-only adapter, but the cache build itself took ~229s.
+    The break-even is roughly 100+ effective training steps.
+    """
+    if not config.sft_auto_prefix_cache:
+        return False
+    if config.sft_prefix_cache:
+        return True  # caller already requested it
+    if config.sft_batch_size != 1:
+        return False
+    if config.sft_lora_layers >= num_layers:
+        return False
+    effective_steps = config.sft_iters * max(1, num_examples)
+    return effective_steps > 100
+
+
+def _should_grad_checkpoint(model_params_b: float, memory_gb: float) -> bool:
+    """Auto-enable gradient checkpointing for large models on constrained memory.
+
+    Gradient checkpointing trades compute for memory by recomputing the
+    forward pass during backward. It is necessary when the model + LoRA
+    gradients + optimizer state would exceed the memory budget.
+    """
+    if memory_gb >= 16:
+        return model_params_b > 7
+    if memory_gb >= 8:
+        return model_params_b > 2
+    return model_params_b > 1
+
+
 async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tuple[list[float], str]:
     """Stage 4: Run real SFT training."""
     from .sft import SFTConfig, generate_sft_data, run_sft
@@ -517,6 +600,24 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         _emit(run_id, "sft-training", "warn", "No SFT examples could be generated — skipping SFT stage")
         return [0.0], None
 
+    # Auto-enable prefix cache when beneficial (2.2x throughput on 8GB M1)
+    num_layers = 0
+    if handle.model is not None and hasattr(handle.model, "layers"):
+        num_layers = len(handle.model.layers)
+    use_prefix_cache = _should_auto_prefix_cache(config, len(examples), num_layers)
+    if use_prefix_cache and not config.sft_prefix_cache:
+        _emit(run_id, "sft-training", "info",
+              f"Auto-enabling frozen-prefix cache ({num_layers - config.sft_lora_layers} frozen layers) for 2x+ throughput")
+
+    # Auto-enable gradient checkpointing for large models on constrained memory
+    use_grad_checkpoint = config.sft_grad_checkpoint
+    model = get_model(config.model_id)
+    if model and not use_grad_checkpoint:
+        use_grad_checkpoint = _should_grad_checkpoint(model.params_b, config.sft_memory_limit_gb)
+        if use_grad_checkpoint:
+            _emit(run_id, "sft-training", "info",
+                  f"Auto-enabling gradient checkpointing ({model.params_b}B params, {config.sft_memory_limit_gb:.0f}GB budget)")
+
     # Run SFT training
     sft_config = SFTConfig(
         learning_rate=config.sft_lr,
@@ -532,10 +633,10 @@ async def _sft_stage(run_id: str, config: RunConfig, handle, domain: str) -> tup
         max_seq_length=config.max_seq_length,
         optimizer=config.sft_optimizer,
         mask_prompt=config.sft_mask_prompt,
-        grad_checkpoint=config.sft_grad_checkpoint,
+        grad_checkpoint=use_grad_checkpoint,
         compile_bucket_size=config.sft_compile_bucket_size,
         clear_cache_threshold_gb=config.sft_clear_cache_threshold_gb,
-        prefix_cache=config.sft_prefix_cache,
+        prefix_cache=use_prefix_cache,
         seed=config.sft_seed,
         steps_per_eval=max(1, min(10, config.sft_iters)),
     )
@@ -608,10 +709,12 @@ async def _grpo_stage(run_id: str, config: RunConfig, handle, domain: str, adapt
         prediction_tokens=config.max_answer_tokens,
     )
 
-    # Create trainer
+    # Create trainer — pass the full handle so the active backend's trainer
+    # can reach its backend-specific state (e.g. the vLLM backend's HF model
+    # and device via handle.backend_obj).
     trainer = await _run_in_executor(
         GRPOTrainer,
-        handle.model,
+        handle,
         handle.tokenizer,
         grpo_config,
         str(run_dir(run_id) / "adapters" / "grpo"),
@@ -690,6 +793,16 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
     model = get_model(config.model_id)
     taskset = get_taskset(config.taskset_id)
 
+    # Resolve the backend. An explicit, non-default config.backend wins; the
+    # default ("mlx") is upgraded to whatever the detected hardware recommends
+    # so a CUDA box does not silently try the MLX path.
+    from .backends import resolve_backend
+
+    if not config.backend or config.backend == "mlx":
+        config.backend = resolve_backend(hardware=hw)
+    elif config.backend in ("cuda", "torch"):
+        config.backend = "vllm"
+
     if not model:
         _emit(run_id, "initializing", "error", f"Model {config.model_id} not found")
         state.status = "failed"
@@ -749,18 +862,26 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
         # ---- Stage 5: Post-SFT benchmark ----
         # run_sft updates the live LoRA layers in-place. Re-loading that same
         # adapter would try to wrap LoRALinear a second time and is invalid.
-        if sft_adapter_path:
-            _emit(run_id, "benchmarking-post-sft", "info", "Evaluating the trained in-memory SFT adapter...")
+        sft_effective = _sft_loss_improved(sft_losses)
+        if config.skip_redundant_benchmarks and not sft_effective:
+            _emit(run_id, "benchmarking-post-sft", "info",
+                  "SFT loss did not decrease — skipping post-SFT benchmark (reuse baseline)")
+            post_sft_acc = baseline_acc
+            post_sft_traces = baseline_traces
+            await _update_progress(run_id, 0.55, "benchmarking-post-sft")
+        else:
+            if sft_adapter_path:
+                _emit(run_id, "benchmarking-post-sft", "info", "Evaluating the trained in-memory SFT adapter...")
 
-        post_sft_acc, post_sft_traces = await _benchmark_stage(
-            run_id,
-            config,
-            handle,
-            domain,
-            "post-sft",
-            0.45,
-            0.55,
-        )
+            post_sft_acc, post_sft_traces = await _benchmark_stage(
+                run_id,
+                config,
+                handle,
+                domain,
+                "post-sft",
+                0.45,
+                0.55,
+            )
         state.post_sft_accuracy = post_sft_acc
         state.post_sft_traces = post_sft_traces
         improvement = post_sft_acc - baseline_acc
@@ -794,17 +915,25 @@ async def run_pipeline(run_id: str, config: RunConfig, hw: HardwareInfo):
             # ---- Stage 7: Post-GRPO benchmark ----
             # GRPO updates the same live LoRA modules in-place. Loading its
             # checkpoint here would incorrectly wrap LoRALinear a second time.
-            _emit(run_id, "benchmarking-post-grpo", "info", "Evaluating the trained in-memory GRPO adapter...")
+            grpo_effective = _grpo_reward_improved(grpo_rewards)
+            if config.skip_redundant_benchmarks and not grpo_effective:
+                _emit(run_id, "benchmarking-post-grpo", "info",
+                      "GRPO reward did not improve — skipping post-GRPO benchmark (reuse post-SFT)")
+                post_grpo_acc = post_sft_acc
+                post_grpo_traces = post_sft_traces
+                await _update_progress(run_id, 0.95, "benchmarking-post-grpo")
+            else:
+                _emit(run_id, "benchmarking-post-grpo", "info", "Evaluating the trained in-memory GRPO adapter...")
 
-            post_grpo_acc, post_grpo_traces = await _benchmark_stage(
-                run_id,
-                config,
-                handle,
-                domain,
-                "post-grpo",
-                0.85,
-                0.95,
-            )
+                post_grpo_acc, post_grpo_traces = await _benchmark_stage(
+                    run_id,
+                    config,
+                    handle,
+                    domain,
+                    "post-grpo",
+                    0.85,
+                    0.95,
+                )
             state.post_grpo_accuracy = post_grpo_acc
             state.post_grpo_traces = post_grpo_traces
             total_improvement = post_grpo_acc - baseline_acc

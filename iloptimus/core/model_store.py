@@ -41,6 +41,11 @@ def repository_for(model: ModelInfo, precision: str, backend: str) -> str:
     if backend == "mlx" and precision in {"int4", "int8"}:
         bits = "4" if precision == "int4" else "8"
         return f"mlx-community/{model.huggingface_id.split('/')[-1]}-{bits}bit"
+    # vLLM / CUDA backend: download the base HuggingFace checkpoint. The
+    # VLLMBackend applies bitsandbytes NF4 4-bit quantization (or 8-bit) at load
+    # time via transformers, so we do not fetch a separate AWQ/GPTQ repo — those
+    # quant schemes are incompatible with PEFT QLoRA training. fp16/int8/int4
+    # all resolve to the same base repo; the precision is realized at load.
     return model.huggingface_id
 
 
