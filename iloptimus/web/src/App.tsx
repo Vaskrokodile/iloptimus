@@ -12,6 +12,7 @@ import WorkspaceTabs from "./components/WorkspaceTabs";
 import RsiPanelPage from "./pages/RsiPanelPage";
 import ResearchPaperPage from "./pages/ResearchPaperPage";
 import OptimusMindMapPage from "./pages/OptimusMindMapPage";
+import HarnessGraphPage from "./pages/HarnessGraphPage";
 
 export default function App() {
   const location = useLocation();
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="/environments" element={<MyEnvironmentsPage />} />
             <Route path="/environments/:environmentId/play" element={<EnvironmentPlayPage />} />
             <Route path="/rsi/:panelId" element={<RsiPanelPage />} />
+            <Route path="/harness-graph" element={<HarnessGraphPage />} />
           </Routes></AppErrorBoundary>
         </main>
       </div>

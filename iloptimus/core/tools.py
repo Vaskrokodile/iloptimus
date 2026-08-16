@@ -29,6 +29,7 @@ from .dataset_tools import (
     expand_dataset,
     filter_dataset,
 )
+from . import automation_tools
 from .mcp_client import MCPTool, call_mcp_tool, list_mcp_tools, public_mcp_servers
 from .storage import app_home
 
@@ -141,6 +142,301 @@ BUILTIN_TOOLS = [
                 "minimum_quality_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
             "required": ["workspace_id", "holdout_task"],
+        },
+    ),
+    # ---- Content scraping & extraction ----
+    ToolDefinition(
+        "extract_html_tables",
+        "Fetch a URL and extract all HTML tables as structured rows with headers.",
+        {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    ),
+    ToolDefinition(
+        "extract_page_links",
+        "Extract all hyperlinks from a web page, optionally filtered by a regex pattern.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "filter_pattern": {"type": "string", "description": "Optional regex to filter links by URL or text"},
+            },
+            "required": ["url"],
+        },
+    ),
+    ToolDefinition(
+        "extract_page_metadata",
+        "Extract page title, meta description, and Open Graph tags from a web page.",
+        {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    ),
+    ToolDefinition(
+        "fetch_json_api",
+        "Fetch a JSON API endpoint and return the parsed data. Pass custom headers as JSON or key:value pairs.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "headers": {"type": "string", "description": "JSON object or comma-separated key:value pairs"},
+            },
+            "required": ["url"],
+        },
+    ),
+    ToolDefinition(
+        "parse_rss_feed",
+        "Parse an RSS 2.0 or Atom XML feed text into structured entries.",
+        {"type": "object", "properties": {"xml_text": {"type": "string"}}, "required": ["xml_text"]},
+    ),
+    ToolDefinition(
+        "crawl_site",
+        "Crawl multiple pages starting from a URL, following same-domain links. Max 10 pages.",
+        {
+            "type": "object",
+            "properties": {
+                "start_url": {"type": "string"},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 10},
+                "same_domain": {"type": "boolean"},
+            },
+            "required": ["start_url"],
+        },
+    ),
+    ToolDefinition(
+        "batch_fetch",
+        "Fetch up to 20 URLs in parallel and return their content.",
+        {
+            "type": "object",
+            "properties": {"urls": {"type": "array", "items": {"type": "string"}}},
+            "required": ["urls"],
+        },
+    ),
+    # ---- Data transformation ----
+    ToolDefinition(
+        "csv_to_json",
+        "Convert CSV text to a list of JSON objects.",
+        {
+            "type": "object",
+            "properties": {"csv_text": {"type": "string"}, "delimiter": {"type": "string"}},
+            "required": ["csv_text"],
+        },
+    ),
+    ToolDefinition(
+        "json_to_csv",
+        "Convert JSON array data to CSV text.",
+        {
+            "type": "object",
+            "properties": {"json_text": {"type": "string"}, "flatten": {"type": "boolean"}},
+            "required": ["json_text"],
+        },
+    ),
+    ToolDefinition(
+        "json_to_jsonl",
+        "Convert a JSON array to JSONL (one object per line).",
+        {"type": "object", "properties": {"json_text": {"type": "string"}}, "required": ["json_text"]},
+    ),
+    ToolDefinition(
+        "jsonl_to_json",
+        "Convert JSONL text to a JSON array.",
+        {"type": "object", "properties": {"jsonl_text": {"type": "string"}}, "required": ["jsonl_text"]},
+    ),
+    ToolDefinition(
+        "chunk_text",
+        "Split text into overlapping chunks of a given size for processing.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "chunk_size": {"type": "integer", "minimum": 100, "maximum": 10000},
+                "overlap": {"type": "integer", "minimum": 0, "maximum": 5000},
+            },
+            "required": ["text"],
+        },
+    ),
+    ToolDefinition(
+        "deduplicate_lines",
+        "Remove duplicate lines from text, preserving order.",
+        {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "case_sensitive": {"type": "boolean"}},
+            "required": ["text"],
+        },
+    ),
+    ToolDefinition(
+        "regex_extract",
+        "Extract all matches of a regex pattern from text.",
+        {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "pattern": {"type": "string"}, "group": {"type": "integer"}},
+            "required": ["text", "pattern"],
+        },
+    ),
+    ToolDefinition(
+        "regex_replace",
+        "Replace all matches of a regex pattern in text.",
+        {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "pattern": {"type": "string"}, "replacement": {"type": "string"}},
+            "required": ["text", "pattern", "replacement"],
+        },
+    ),
+    ToolDefinition(
+        "compute_hash",
+        "Compute a cryptographic hash (sha256, md5, sha1, etc.) of text.",
+        {
+            "type": "object",
+            "properties": {"data": {"type": "string"}, "algorithm": {"type": "string"}},
+            "required": ["data"],
+        },
+    ),
+    ToolDefinition(
+        "base64_encode",
+        "Base64-encode text.",
+        {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    ),
+    ToolDefinition(
+        "base64_decode",
+        "Base64-decode a string.",
+        {"type": "object", "properties": {"encoded": {"type": "string"}}, "required": ["encoded"]},
+    ),
+    ToolDefinition(
+        "text_diff",
+        "Compute a unified diff between two texts.",
+        {
+            "type": "object",
+            "properties": {"text_a": {"type": "string"}, "text_b": {"type": "string"}, "context": {"type": "integer"}},
+            "required": ["text_a", "text_b"],
+        },
+    ),
+    ToolDefinition(
+        "text_stats",
+        "Compute statistics about text: word count, char count, sentence count, avg word length, etc.",
+        {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    ),
+    # ---- File & workspace operations ----
+    ToolDefinition(
+        "write_file",
+        "Write content to a file in the workspace. Set append=true to add to an existing file.",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "append": {"type": "boolean"}},
+            "required": ["path", "content"],
+        },
+    ),
+    ToolDefinition(
+        "read_file",
+        "Read a file from the workspace (max 512KB).",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    ToolDefinition(
+        "list_files",
+        "List files in a workspace directory.",
+        {"type": "object", "properties": {"path": {"type": "string"}}},
+    ),
+    ToolDefinition(
+        "delete_file",
+        "Delete a file from the workspace.",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    ToolDefinition(
+        "file_info",
+        "Get metadata about a file in the workspace (size, modified time, extension).",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
+    ToolDefinition(
+        "create_zip",
+        "Create a zip archive from workspace files.",
+        {
+            "type": "object",
+            "properties": {"paths": {"type": "array", "items": {"type": "string"}}, "zip_path": {"type": "string"}},
+            "required": ["paths", "zip_path"],
+        },
+    ),
+    ToolDefinition(
+        "extract_zip",
+        "Extract a zip archive into the workspace.",
+        {
+            "type": "object",
+            "properties": {"zip_path": {"type": "string"}, "extract_to": {"type": "string"}},
+            "required": ["zip_path"],
+        },
+    ),
+    # ---- Code analysis ----
+    ToolDefinition(
+        "syntax_check_python",
+        "Check Python code for syntax errors without executing it.",
+        {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+    ),
+    ToolDefinition(
+        "syntax_check_javascript",
+        "Basic JavaScript syntax check using brace/paren/bracket matching.",
+        {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+    ),
+    ToolDefinition(
+        "extract_python_functions",
+        "Extract function definitions (name, args, docstring) from Python code.",
+        {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+    ),
+    ToolDefinition(
+        "count_lines",
+        "Count lines of code, comments, and blank lines.",
+        {
+            "type": "object",
+            "properties": {"code": {"type": "string"}, "language": {"type": "string"}},
+            "required": ["code"],
+        },
+    ),
+    # ---- Batch / utility ----
+    ToolDefinition(
+        "batch_regex_extract",
+        "Apply the same regex pattern to a list of strings and return all matches.",
+        {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "string"}}, "pattern": {"type": "string"}},
+            "required": ["items", "pattern"],
+        },
+    ),
+    ToolDefinition(
+        "generate_dataset_rows",
+        "Generate JSONL dataset rows by expanding a template with variable lists (cartesian product).",
+        {
+            "type": "object",
+            "properties": {
+                "template": {"type": "string"},
+                "variables": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+                "max_rows": {"type": "integer", "minimum": 1, "maximum": 500},
+            },
+            "required": ["template", "variables"],
+        },
+    ),
+    ToolDefinition(
+        "merge_json_objects",
+        "Merge multiple JSON objects into one (shallow or deep merge).",
+        {
+            "type": "object",
+            "properties": {
+                "objects": {"type": "array", "items": {"type": "string"}},
+                "strategy": {"type": "string", "enum": ["shallow", "deep"]},
+            },
+            "required": ["objects"],
+        },
+    ),
+    ToolDefinition(
+        "flatten_json",
+        "Flatten a nested JSON object into dot-notation keys.",
+        {
+            "type": "object",
+            "properties": {"json_text": {"type": "string"}, "separator": {"type": "string"}},
+            "required": ["json_text"],
+        },
+    ),
+    ToolDefinition(
+        "sleep",
+        "Sleep for a given number of seconds (max 30). Useful for rate-limiting between operations.",
+        {"type": "object", "properties": {"seconds": {"type": "number", "minimum": 0, "maximum": 30}}, "required": ["seconds"]},
+    ),
+    ToolDefinition(
+        "retry_plan",
+        "Generate a structured retry plan with exponential backoff for an operation.",
+        {
+            "type": "object",
+            "properties": {"description": {"type": "string"}, "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10}},
+            "required": ["description"],
         },
     ),
 ]
@@ -525,6 +821,29 @@ TOOL_ALIASES = {
     "web.fetch": "web_fetch",
     "time": "current_time",
     "math": "calculator",
+    "hash": "compute_hash",
+    "b64_encode": "base64_encode",
+    "b64_decode": "base64_decode",
+    "base64": "base64_encode",
+    "diff": "text_diff",
+    "stats": "text_stats",
+    "word_count": "text_stats",
+    "dedup": "deduplicate_lines",
+    "dedupe": "deduplicate_lines",
+    "read": "read_file",
+    "write": "write_file",
+    "ls": "list_files",
+    "rm": "delete_file",
+    "stat": "file_info",
+    "zip": "create_zip",
+    "unzip": "extract_zip",
+    "py_check": "syntax_check_python",
+    "js_check": "syntax_check_javascript",
+    "lint_python": "syntax_check_python",
+    "lint_javascript": "syntax_check_javascript",
+    "sleep_tool": "sleep",
+    "wait": "sleep",
+    "retry": "retry_plan",
 }
 
 
@@ -758,6 +1077,150 @@ async def execute_tool(name: str, arguments: dict[str, Any], mcp_tools: dict[str
                 minimum_quality_score=max(
                     0.0, min(1.0, float(arguments.get("minimum_quality_score") or 0.5))
                 ),
+            )
+        elif name == "extract_html_tables":
+            result = await automation_tools.extract_html_tables(str(arguments.get("url", "")))
+        elif name == "extract_page_links":
+            result = await automation_tools.extract_page_links(
+                str(arguments.get("url", "")),
+                filter_pattern=str(arguments.get("filter_pattern") or ""),
+            )
+        elif name == "extract_page_metadata":
+            result = await automation_tools.extract_page_metadata(str(arguments.get("url", "")))
+        elif name == "fetch_json_api":
+            result = await automation_tools.fetch_json_api(
+                str(arguments.get("url", "")),
+                headers=str(arguments.get("headers") or ""),
+            )
+        elif name == "parse_rss_feed":
+            result = automation_tools.parse_rss_feed(str(arguments.get("xml_text", "")))
+        elif name == "crawl_site":
+            result = await automation_tools.crawl_site(
+                str(arguments.get("start_url", "")),
+                max_pages=max(1, min(10, int(arguments.get("max_pages") or 5))),
+                same_domain=bool(arguments.get("same_domain", True)),
+            )
+        elif name == "batch_fetch":
+            urls = [str(u) for u in arguments.get("urls", []) if isinstance(u, str)]
+            result = await automation_tools.batch_fetch(urls)
+        elif name == "csv_to_json":
+            result = automation_tools.csv_to_json(
+                str(arguments.get("csv_text", "")),
+                delimiter=str(arguments.get("delimiter") or ",")[:1],
+            )
+        elif name == "json_to_csv":
+            result = automation_tools.json_to_csv(
+                str(arguments.get("json_text", "")),
+                flatten=bool(arguments.get("flatten", True)),
+            )
+        elif name == "json_to_jsonl":
+            result = automation_tools.json_to_jsonl(str(arguments.get("json_text", "")))
+        elif name == "jsonl_to_json":
+            result = automation_tools.jsonl_to_json(str(arguments.get("jsonl_text", "")))
+        elif name == "chunk_text":
+            result = automation_tools.chunk_text(
+                str(arguments.get("text", "")),
+                chunk_size=max(100, min(10_000, int(arguments.get("chunk_size") or 1000))),
+                overlap=max(0, min(5_000, int(arguments.get("overlap") or 100))),
+            )
+        elif name == "deduplicate_lines":
+            result = automation_tools.deduplicate_lines(
+                str(arguments.get("text", "")),
+                case_sensitive=bool(arguments.get("case_sensitive", True)),
+            )
+        elif name == "regex_extract":
+            result = automation_tools.regex_extract(
+                str(arguments.get("text", "")),
+                str(arguments.get("pattern", "")),
+                group=int(arguments.get("group") or 0),
+            )
+        elif name == "regex_replace":
+            result = automation_tools.regex_replace(
+                str(arguments.get("text", "")),
+                str(arguments.get("pattern", "")),
+                str(arguments.get("replacement") or ""),
+            )
+        elif name == "compute_hash":
+            result = automation_tools.compute_hash(
+                str(arguments.get("data", "")),
+                algorithm=str(arguments.get("algorithm") or "sha256"),
+            )
+        elif name == "base64_encode":
+            result = automation_tools.base64_encode(str(arguments.get("text", "")))
+        elif name == "base64_decode":
+            result = automation_tools.base64_decode(str(arguments.get("encoded", "")))
+        elif name == "text_diff":
+            result = automation_tools.text_diff(
+                str(arguments.get("text_a", "")),
+                str(arguments.get("text_b", "")),
+                context=max(0, min(10, int(arguments.get("context") or 3))),
+            )
+        elif name == "text_stats":
+            result = automation_tools.text_stats(str(arguments.get("text", "")))
+        elif name == "write_file":
+            result = automation_tools.write_file(
+                str(arguments.get("path", "")),
+                str(arguments.get("content", "")),
+                append=bool(arguments.get("append", False)),
+            )
+        elif name == "read_file":
+            result = automation_tools.read_file(str(arguments.get("path", "")))
+        elif name == "list_files":
+            result = automation_tools.list_files(str(arguments.get("path") or "."))
+        elif name == "delete_file":
+            result = automation_tools.delete_file(str(arguments.get("path", "")))
+        elif name == "file_info":
+            result = automation_tools.file_info(str(arguments.get("path", "")))
+        elif name == "create_zip":
+            paths = [str(p) for p in arguments.get("paths", []) if isinstance(p, str)]
+            result = automation_tools.create_zip(paths, str(arguments.get("zip_path", "")))
+        elif name == "extract_zip":
+            result = automation_tools.extract_zip(
+                str(arguments.get("zip_path", "")),
+                extract_to=str(arguments.get("extract_to") or "."),
+            )
+        elif name == "syntax_check_python":
+            result = automation_tools.syntax_check_python(str(arguments.get("code", "")))
+        elif name == "syntax_check_javascript":
+            result = automation_tools.syntax_check_javascript(str(arguments.get("code", "")))
+        elif name == "extract_python_functions":
+            result = automation_tools.extract_python_functions(str(arguments.get("code", "")))
+        elif name == "count_lines":
+            result = automation_tools.count_lines(
+                str(arguments.get("code", "")),
+                language=str(arguments.get("language") or "auto"),
+            )
+        elif name == "batch_regex_extract":
+            items = [str(i) for i in arguments.get("items", []) if isinstance(i, str)]
+            result = automation_tools.batch_regex_extract(items, str(arguments.get("pattern", "")))
+        elif name == "generate_dataset_rows":
+            variables = {
+                str(k): [str(v) for v in vals if isinstance(v, str)]
+                for k, vals in arguments.get("variables", {}).items()
+                if isinstance(vals, list)
+            }
+            result = automation_tools.generate_dataset_rows(
+                str(arguments.get("template", "")),
+                variables,
+                max_rows=max(1, min(500, int(arguments.get("max_rows") or 100))),
+            )
+        elif name == "merge_json_objects":
+            objects = [str(o) for o in arguments.get("objects", []) if isinstance(o, str)]
+            result = automation_tools.merge_json_objects(
+                objects,
+                strategy=str(arguments.get("strategy") or "deep"),
+            )
+        elif name == "flatten_json":
+            result = automation_tools.flatten_json(
+                str(arguments.get("json_text", "")),
+                separator=str(arguments.get("separator") or "."),
+            )
+        elif name == "sleep":
+            result = automation_tools.sleep_tool(float(arguments.get("seconds") or 0))
+        elif name == "retry_plan":
+            result = automation_tools.retry_wrapper(
+                str(arguments.get("description", "")),
+                max_attempts=max(1, min(10, int(arguments.get("max_attempts") or 3))),
             )
         elif name in mcp_tools:
             result = await call_mcp_tool(mcp_tools[name], arguments)

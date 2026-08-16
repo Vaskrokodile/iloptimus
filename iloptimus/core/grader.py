@@ -104,6 +104,24 @@ _AGENTIC_CODING_INSTRUCTION = (
     "the key concepts, and verify your work. Generic filler lowers your score.\n\n"
 )
 
+_HUMANEVAL_INSTRUCTION = (
+    "Solve the coding task below. First, reason through the problem inside "
+    "<reasoning>...</reasoning> tags — explain your approach, trace edge cases, "
+    "and verify your solution mentally. Then provide your code inside "
+    "<answer>```python\n...\n```</answer> tags.\n\n"
+    "Your reasoning quality affects your score: be thorough but concise, cover "
+    "the key concepts, and verify your work. Generic filler lowers your score.\n\n"
+)
+
+_GSM8K_INSTRUCTION = (
+    "Solve the math word problem below. First, work through it inside "
+    "<reasoning>...</reasoning> tags — show your calculation step by step, "
+    "check your answer, and avoid generic filler. Then give your final answer "
+    "inside <answer>...</answer> tags.\n\n"
+    "Your reasoning quality affects your score: be thorough but concise, show "
+    "the key calculations, and verify your work.\n\n"
+)
+
 CODE_BLOCK_RE = re.compile(r"```python:([^\n]+)\n(.*?)```", re.DOTALL)
 
 
@@ -353,6 +371,86 @@ def grade_agentic_coding(response: str, task_idx: int) -> GradedResult:
     )
 
 
+def grade_humaneval(response: str, task_idx: int) -> GradedResult:
+    """Grade a HumanEval coding task response."""
+    tasks_mod = _load_module(
+        "humaneval_v1_tasks",
+        str(_taskset_path("humaneval_v1", "tasks.py")),
+    )
+    scoring_mod = _load_module(
+        "humaneval_v1_scoring",
+        str(_taskset_path("humaneval_v1", "scoring.py")),
+    )
+    verify_script = str(_taskset_path("humaneval_v1", "verify.py"))
+
+    task = tasks_mod.TASKS[task_idx]
+    code = scoring_mod.extract_code(response)
+    if not code.strip():
+        return GradedResult(score=0.0, correctness=0.0, reasoning_quality=0.0)
+
+    # Run hidden tests in sandbox
+    test_result = _run_sandbox(
+        verify_script,
+        {"code": code, "tests": task.tests, "entry_point": task.entry_point},
+        timeout=5.0,
+    )
+    correctness = test_result.get("pass_rate", 0.0)
+
+    # Anti-laziness penalty
+    laziness = scoring_mod.detect_laziness(code, task.required_params, task.required_constructs)
+    if laziness.score > 0:
+        correctness *= max(0.2, 1.0 - laziness.score * 0.8)
+
+    # Reasoning quality shaping
+    rq, breakdown = scoring_mod.score_reasoning_quality(
+        response, task.expected_concepts, task.token_budget, correctness
+    )
+    final = scoring_mod.compute_final_score(correctness, rq)
+
+    return GradedResult(
+        score=final,
+        correctness=correctness,
+        reasoning_quality=rq,
+        coverage=breakdown.coverage,
+        verification=breakdown.verification,
+        info={
+            "laziness_reasons": laziness.reasons,
+            "test_result": test_result,
+        },
+    )
+
+
+def grade_gsm8k(response: str, task_idx: int) -> GradedResult:
+    """Grade a GSM8K math task response (no sandbox needed)."""
+    tasks_mod = _load_module(
+        "gsm8k_v1_tasks",
+        str(_taskset_path("gsm8k_v1", "tasks.py")),
+    )
+    scoring_mod = _load_module(
+        "gsm8k_v1_scoring",
+        str(_taskset_path("gsm8k_v1", "scoring.py")),
+    )
+
+    task = tasks_mod.TASKS[task_idx]
+    answer = tasks_mod._extract_answer_text(response)
+    correct, info = task.verify(answer)
+    correctness = 1.0 if correct else 0.0
+
+    rq, breakdown = scoring_mod.score_reasoning_quality(
+        response, task.expected_concepts, task.token_budget, correctness
+    )
+    final = scoring_mod.compute_final_score(correctness, rq)
+
+    return GradedResult(
+        score=final,
+        correctness=correctness,
+        reasoning_quality=rq,
+        coverage=breakdown.coverage,
+        verification=breakdown.verification,
+        info={"verify_info": info},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Unified interface
 # ---------------------------------------------------------------------------
@@ -363,6 +461,8 @@ _GRADERS = {
     "reasoning": grade_reasoning,
     "agentic-reasoning": grade_agentic_reasoning,
     "agentic-coding": grade_agentic_coding,
+    "humaneval": grade_humaneval,
+    "gsm8k": grade_gsm8k,
 }
 
 _INSTRUCTIONS = {
@@ -370,6 +470,8 @@ _INSTRUCTIONS = {
     "reasoning": _REASONING_INSTRUCTION,
     "agentic-reasoning": _AGENTIC_REASONING_INSTRUCTION,
     "agentic-coding": _AGENTIC_CODING_INSTRUCTION,
+    "humaneval": _HUMANEVAL_INSTRUCTION,
+    "gsm8k": _GSM8K_INSTRUCTION,
 }
 
 
@@ -471,6 +573,22 @@ def build_prompt(domain: str, task_idx: int) -> str:
         codebase_str = "\n\n".join(f"### {fname}\n```python\n{content}```" for fname, content in task.codebase.items())
         return instruction + f"## Task: {task.name}\n\n{task.spec}\n\n## Codebase\n\n{codebase_str}"
 
+    elif domain == "humaneval":
+        tasks_mod = _load_module(
+            "humaneval_v1_tasks",
+            str(_taskset_path("humaneval_v1", "tasks.py")),
+        )
+        task = tasks_mod.TASKS[task_idx]
+        return instruction + f"## Task: {task.name}\n\n{task.spec}\n\nSignature: `{task.signature}`"
+
+    elif domain == "gsm8k":
+        tasks_mod = _load_module(
+            "gsm8k_v1_tasks",
+            str(_taskset_path("gsm8k_v1", "tasks.py")),
+        )
+        task = tasks_mod.TASKS[task_idx]
+        return instruction + f"## Task: {task.name}\n\n{task.spec}\n\nAnswer format: {task.answer_format}."
+
     raise ValueError(f"Unknown domain: {domain}")
 
 
@@ -489,6 +607,8 @@ def get_num_tasks(domain: str) -> int:
         "reasoning": ("il_reasoning_tasks", "il_reasoning_v1", "tasks.py"),
         "agentic-reasoning": ("il_agentic_reasoning_tasks", "il_agentic_reasoning_v1", "tasks.py"),
         "agentic-coding": ("il_agentic_coding_tasks", "il_agentic_coding_v1", "tasks.py"),
+        "humaneval": ("humaneval_v1_tasks", "humaneval_v1", "tasks.py"),
+        "gsm8k": ("gsm8k_v1_tasks", "gsm8k_v1", "tasks.py"),
     }
     mod_name, pkg_id, filename = pkg_map[domain]
     tasks_mod = _load_module(mod_name, str(_taskset_path(pkg_id, filename)))

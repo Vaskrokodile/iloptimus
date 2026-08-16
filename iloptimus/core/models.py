@@ -45,6 +45,18 @@ MODELS: list[ModelInfo] = [
         tags=["reasoning", "recommended", "il-original"],
     ),
     ModelInfo(
+        id="boostedv1-ilv9",
+        name="BoostedV1-ILv9",
+        huggingface_id="auryn-macmillan/boostedv1-ilv9",
+        params_b=1.5,
+        fp16_gb=3.5, fp32_gb=6.5, int8_gb=2.0, int4_gb=1.2,
+        family="deepseek-r1-distill",
+        context_length=131072,
+        backends=["mlx", "vllm"],
+        description="Continued LoRA training of DeepSeek-R1-Distill-Qwen-1.5B with 3 rounds of IL v9 self-improvement. HumanEval 7.3% -> 11.0%.",
+        tags=["reasoning", "recommended", "il-improved"],
+    ),
+    ModelInfo(
         id="deepseek-r1-distill-qwen-7b",
         name="DeepSeek-R1-Distill-Qwen-7B",
         huggingface_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",

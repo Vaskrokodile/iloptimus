@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -70,6 +69,30 @@ TASKSET_REGISTRY: list[dict] = [
         "tags": ["code", "agentic", "il", "multi-file", "execution"],
         "eval_config": {"num_examples": 10, "rollouts_per_example": 4},
     },
+    {
+        "id": "humaneval-v1",
+        "name": "HumanEval v1",
+        "package_name": "humaneval_v1",
+        "path": "humaneval_v1",
+        "domain": "humaneval",
+        "description": "25 curated HumanEval coding benchmark problems: string manipulation, math, algorithms, data structures, edge cases. Sandboxed test execution with anti-laziness and efficiency-aware reward shaping. Used by the self-improvement loop to benchmark and train on real coding tasks.",
+        "num_tasks": 25,
+        "needs_sandbox": True,
+        "tags": ["code", "humaneval", "benchmark", "single-turn", "execution"],
+        "eval_config": {"num_examples": 25, "rollouts_per_example": 4},
+    },
+    {
+        "id": "gsm8k-v1",
+        "name": "GSM8K v1",
+        "package_name": "gsm8k_v1",
+        "path": "gsm8k_v1",
+        "domain": "gsm8k",
+        "description": "25 curated GSM8K grade-school math word problems: arithmetic, multi-step reasoning, unit conversion, percentages, fractions, rates, geometry, logic. Deterministic numeric verification with efficiency-aware reward shaping. Used by the self-improvement loop to benchmark and train on math reasoning.",
+        "num_tasks": 25,
+        "needs_sandbox": False,
+        "tags": ["math", "gsm8k", "benchmark", "reasoning", "single-turn"],
+        "eval_config": {"num_examples": 25, "rollouts_per_example": 4},
+    },
 ]
 
 
@@ -109,7 +132,7 @@ def get_all_tasksets() -> list[TasksetInfo]:
     return builtins + custom
 
 
-def get_taskset(taskset_id: str) -> Optional[TasksetInfo]:
+def get_taskset(taskset_id: str) -> TasksetInfo | None:
     for t in get_all_tasksets():
         if t.id == taskset_id:
             return t

@@ -453,3 +453,79 @@ export function streamRunEvents(
   if (onError) es.onerror = onError;
   return es;
 }
+
+// ---------------------------------------------------------------------------
+// Harness graph — algorithmic harness self-improvement
+// ---------------------------------------------------------------------------
+
+export interface ActionNode {
+  key: string;
+  action_type: string;
+  category: "action" | "mistake";
+  label: string;
+  weight: number;
+  observations: number;
+  successes: number;
+  failures: number;
+  ema_success: number;
+  last_seen: number;
+}
+
+export interface ActionEdge {
+  source: string;
+  target: string;
+  co_occurrences: number;
+  joint_successes: number;
+  weight: number;
+}
+
+export interface TaskNode {
+  id: string;
+  kind: string;
+  success: boolean;
+  score: number;
+  action_keys: string[];
+  created_at: number;
+}
+
+export interface HarnessGraph {
+  nodes: ActionNode[];
+  edges: ActionEdge[];
+  tasks: TaskNode[];
+  total_tasks: number;
+  total_actions: number;
+  total_edges: number;
+  pending_tasks: number;
+}
+
+export interface EfficiencySnapshot {
+  timestamp: number;
+  efficiency: number;
+  total_actions: number;
+  total_tasks: number;
+  success_rate: number;
+}
+
+export async function getHarnessGraph(): Promise<HarnessGraph> {
+  return fetchJSON("/api/harness-graph");
+}
+
+export async function getHarnessGraphEfficiency(limit = 500): Promise<EfficiencySnapshot[]> {
+  return fetchJSON(`/api/harness-graph/efficiency?limit=${limit}`);
+}
+
+export async function getHarnessGraphTopActions(limit = 20): Promise<ActionNode[]> {
+  return fetchJSON(`/api/harness-graph/top-actions?limit=${limit}`);
+}
+
+export async function ingestToolLogs(): Promise<{ ingested: number }> {
+  const res = await fetch("/api/harness-graph/ingest-tool-logs", { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function resetHarnessGraph(): Promise<{ status: string }> {
+  const res = await fetch("/api/harness-graph", { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
