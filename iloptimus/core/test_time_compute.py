@@ -606,6 +606,12 @@ def _chrome_binary() -> str | None:
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        # Windows paths
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        # Windows Edge (Chromium-based)
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     ]
     return next((str(candidate) for candidate in candidates if candidate and Path(candidate).is_file()), None)
 
