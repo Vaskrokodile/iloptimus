@@ -31,10 +31,12 @@ import {
   getRuns,
   getRun,
   createRun,
+  preflightRun,
   streamRunEvents,
   type ModelInfo,
   type TasksetInfo,
   type HardwareInfo,
+  type RunPreflight,
   type RunState,
   type LogEvent,
 } from "../api/client";
@@ -86,6 +88,8 @@ export default function ILStudioPage() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunState | null>(null);
   const [events, setEvents] = useState<LogEvent[]>([]);
+  const [preflight, setPreflight] = useState<RunPreflight | null>(null);
+  const [runError, setRunError] = useState("");
   const [starting, setStarting] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -150,22 +154,27 @@ export default function ILStudioPage() {
   const handleStartRun = async () => {
     if (!selectedModel || !selectedTaskset) return;
     setStarting(true);
+    setRunError("");
+    const config = {
+      model_id: selectedModel,
+      taskset_id: selectedTaskset,
+      precision: precision || undefined,
+      sft_iters: sftIters,
+      grpo_iters: grpoIters,
+      grpo_group_size: grpoGroupSize,
+      benchmark_tasks: benchmarkTasks,
+      benchmark_batch_size: benchmarkBatchSize,
+    };
     try {
-      const result = await createRun({
-        model_id: selectedModel,
-        taskset_id: selectedTaskset,
-        precision: precision || undefined,
-        sft_iters: sftIters,
-        grpo_iters: grpoIters,
-        grpo_group_size: grpoGroupSize,
-        benchmark_tasks: benchmarkTasks,
-        benchmark_batch_size: benchmarkBatchSize,
-      });
+      const checked = await preflightRun(config);
+      setPreflight(checked);
+      if (!checked.ready) return;
+      const result = await createRun(config);
       setActiveRunId(result.id);
       setEvents([]);
       getRuns().then(setRuns);
     } catch (err) {
-      console.error("Failed to start run:", err);
+      setRunError(err instanceof Error ? err.message : "Could not start run");
     } finally {
       setStarting(false);
     }
@@ -349,6 +358,26 @@ export default function ILStudioPage() {
                 </AnimatePresence>
               </div>
 
+              {preflight && (
+                <div className={`rounded-xl border p-3 ${preflight.ready ? "border-success/30 bg-success/5" : "border-error/30 bg-error/5"}`} role="status">
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <strong className="text-xs text-fg-primary">{preflight.ready ? "Run preflight passed" : "Run blocked before model load"}</strong>
+                    <span className="text-xs text-fg-muted">{preflight.backend.toUpperCase()} · {preflight.precision}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {preflight.checks.map((check) => (
+                      <div key={check.id} className="flex items-start gap-2 text-xs">
+                        <span className={check.status === "pass" ? "text-success" : check.status === "warn" ? "text-warning" : "text-error"}>
+                          {check.status === "pass" ? "✓" : check.status === "warn" ? "!" : "×"}
+                        </span>
+                        <span className="text-fg-secondary"><strong>{check.label}:</strong> {check.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {runError && <div className="form-error">{runError}</div>}
+
               {/* Start button */}
               <button
                 onClick={handleStartRun}
@@ -356,7 +385,7 @@ export default function ILStudioPage() {
                 className="btn-primary w-full flex items-center justify-center gap-2"
               >
                 {starting ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" /> Starting...</>
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Validating run...</>
                 ) : (
                   <><Play className="w-4 h-4" /> Start IL Pipeline</>
                 )}

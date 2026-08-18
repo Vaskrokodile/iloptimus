@@ -103,6 +103,7 @@ from .core.model_store import (
 )
 from .core.performance import estimate_context_performance, record_chat_performance
 from .core.pipeline import _run_in_executor
+from .core.preflight import evaluate_run_preflight
 from .core.rsi_panels import RsiPanelManager
 from .core.scene_spec import (
     audit_scene_authorship,
@@ -3103,25 +3104,39 @@ def create_app() -> FastAPI:
 
     # ---- Run management ----
 
-    @app.post("/api/runs")
-    async def create_run_endpoint(req: CreateRunRequest):
+    def _resolve_run_preflight(req: CreateRunRequest):
         hw = _get_hardware()
         model = get_model(req.model_id)
-        if not model:
-            raise HTTPException(400, f"Unknown model: {req.model_id}")
         taskset = get_taskset(req.taskset_id)
-        if not taskset:
-            raise HTTPException(400, f"Unknown taskset: {req.taskset_id}")
-
         backend = req.backend or hw.recommended_backend
-        precision = req.precision or compatible_precision(model, hw)
-        if backend not in {"mlx", "vllm"}:
-            raise HTTPException(
-                409,
-                "IL Optimus supports local training on Apple Silicon (MLX) or NVIDIA CUDA (vLLM)",
-            )
-        if not resolve_model_source(model.id, precision, backend):
-            raise HTTPException(409, "Download this model from Model Library before training")
+        precision = req.precision or (compatible_precision(model, hw) if model else "int4")
+        source_available = bool(
+            model
+            and backend in {"mlx", "vllm"}
+            and resolve_model_source(model.id, precision, backend)
+        )
+        result = evaluate_run_preflight(
+            model_id=req.model_id,
+            taskset_id=req.taskset_id,
+            backend=backend,
+            precision=precision,
+            benchmark_batch_size=req.benchmark_batch_size,
+            hardware=hw,
+            model=model,
+            taskset=taskset,
+            source_available=source_available,
+        )
+        return hw, model, taskset, backend, precision, result
+
+    @app.post("/api/runs/preflight")
+    async def run_preflight_endpoint(req: CreateRunRequest):
+        return _resolve_run_preflight(req)[-1].public()
+
+    @app.post("/api/runs")
+    async def create_run_endpoint(req: CreateRunRequest):
+        hw, model, taskset, backend, precision, preflight = _resolve_run_preflight(req)
+        if not preflight.ready:
+            raise HTTPException(status_code=409, detail=preflight.public())
 
         # If the model is a base + LoRA adapter pair and the user did not
         # explicitly set adapter_path, auto-populate it so training continues

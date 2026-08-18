@@ -220,6 +220,22 @@ export interface RunConfig {
   max_answer_tokens: number;
 }
 
+export interface RunPreflightCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "block";
+  detail: string;
+}
+
+export interface RunPreflight {
+  ready: boolean;
+  model_id: string;
+  taskset_id: string;
+  backend: string;
+  precision: string;
+  checks: RunPreflightCheck[];
+}
+
 export interface RunState {
   id: string;
   status: string;
@@ -425,6 +441,16 @@ export async function getRuns(): Promise<RunState[]> {
 
 export async function getRun(id: string): Promise<RunState> {
   return fetchJSON(`/api/runs/${id}`);
+}
+
+export async function preflightRun(config: Partial<RunConfig>): Promise<RunPreflight> {
+  const res = await fetch("/api/runs/preflight", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error(`Preflight failed: ${await res.text()}`);
+  return res.json();
 }
 
 export async function createRun(config: Partial<RunConfig>): Promise<{ id: string; status: string }> {
