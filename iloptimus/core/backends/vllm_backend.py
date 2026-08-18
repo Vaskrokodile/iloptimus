@@ -325,7 +325,14 @@ class VLLMBackend(Backend):
         #
         # Skip torch.compile in training mode (merge_adapter=False) because
         # it interferes with gradient computation and PEFT training.
-        if merge_adapter:
+        # Also skip on Windows where the MSVC compiler (cl.exe) is typically
+        # not available in PATH, causing "Compiler: cl is not found" errors
+        # when the compiled graph is first executed.
+        import sys as _sys
+        _skip_compile = _sys.platform == "win32"
+        if _skip_compile and merge_adapter:
+            print("torch.compile skipped (Windows — cl.exe not available)")
+        elif merge_adapter:
             try:
                 model.forward = torch.compile(model.forward, mode="default")
                 print("torch.compile enabled (forward, mode=default)")
@@ -1045,8 +1052,12 @@ class VLLMBackend(Backend):
         # Save the LoRA adapter.
         model.save_pretrained(adapter_path)
         tokenizer.save_pretrained(adapter_path)
-        # Record an adapter_config.json compatible with the MLX loader's schema
-        # so downstream tooling can inspect either backend's adapters.
+        # Record an MLX-compatible adapter config alongside the PEFT one.
+        # IMPORTANT: model.save_pretrained() writes a PEFT-format adapter_config.json
+        # with keys like "peft_type", "r", "lora_alpha", "target_modules". We must
+        # NOT overwrite it — the vLLM/PEFT loader needs it. Instead, save the MLX-
+        # format config to a separate file so downstream tooling can inspect either
+        # backend's adapters.
         cfg = {
             "adapter_path": os.path.basename(adapter_path),
             "fine_tune_type": "lora",
@@ -1066,7 +1077,7 @@ class VLLMBackend(Backend):
             "trainable_parameters": int(trainable_params),
             "seed": config.seed,
         }
-        with open(os.path.join(adapter_path, "adapter_config.json"), "w") as f:
+        with open(os.path.join(adapter_path, "mlx_adapter_config.json"), "w") as f:
             json.dump(cfg, f, indent=4)
 
         # Mark the freshly trained adapter as active so subsequent vLLM inference
@@ -1374,6 +1385,8 @@ class VLLMGRPOTrainer(GRPOTrainerLike):
         os.makedirs(path, exist_ok=True)
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+        # Save MLX-format config to a separate file — do NOT overwrite the
+        # PEFT adapter_config.json that save_pretrained() just wrote.
         cfg = {
             "adapter_path": os.path.basename(path),
             "fine_tune_type": "lora",
@@ -1381,7 +1394,7 @@ class VLLMGRPOTrainer(GRPOTrainerLike):
             "lora_parameters": {"rank": 8, "scale": 1.0, "dropout": 0.0},
             "backend": "vllm",
         }
-        with open(os.path.join(path, "adapter_config.json"), "w") as f:
+        with open(os.path.join(path, "mlx_adapter_config.json"), "w") as f:
             json.dump(cfg, f, indent=4)
         # Make the freshly trained adapter active for subsequent vLLM inference.
         if self.handle.backend_obj is not None:

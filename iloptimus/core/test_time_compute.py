@@ -42,6 +42,10 @@ FEATURE_PATTERNS: dict[str, tuple[str, ...]] = {
     "responsive": (r"resize", r"devicePixelRatio", r"innerWidth"),
     "island": (r"water", r"terrain", r"island"),
     "sakura": (r"sakura", r"cherry", r"blossom", r"petal"),
+    "city": (r"building", r"skyscraper", r"street", r"city", r"urban", r"grid"),
+    "paris": (r"eiffel", r"paris", r"seine", r"tower", r"haussmann"),
+    "desert": (r"desert", r"mountain", r"sand", r"canyon", r"dune"),
+    "sky_island": (r"floating", r"sky", r"cloud", r"pagoda", r"chinese", r"temple"),
     "accessibility": (r"aria-", r"role=", r"prefers-reduced-motion"),
 }
 
@@ -300,6 +304,14 @@ def derive_artifact_contract(query: str) -> ArtifactContract:
             aliases.update({"animated", "animate", "motion"})
         if feature == "sakura":
             aliases.update({"cherry blossom", "cherry blossoms", "petals"})
+        if feature == "city":
+            aliases.update({"new york", "nyc", "manhattan", "skyscraper", "urban", "downtown", "buildings"})
+        if feature == "paris":
+            aliases.update({"eiffel tower", "eiffel", "seine", "haussmann"})
+        if feature == "desert":
+            aliases.update({"deserted island", "mountain", "sand", "canyon", "dune"})
+        if feature == "sky_island":
+            aliases.update({"sky island", "floating island", "cloud island", "chinese building", "pagoda", "temple in the sky"})
         if any(alias in normalized for alias in aliases):
             requested.append(feature)
     if web:
@@ -356,18 +368,45 @@ def framework_artifact_source(query: str, contract: ArtifactContract) -> str | N
     fallback artifact that gives the user a usable project when an experimental
     adapter is rejected.
     """
-    del query
     if contract.artifact_kind != "web" or "three.js" not in contract.requested_features:
         return None
     features = set(contract.requested_features)
-    if {"sakura", "island"}.issubset(features):
-        title = "Sakura Island"
-    elif "island" in features:
-        title = "Voxel Island"
-    else:
-        title = "Interactive Three.js World"
-    template = Path(__file__).parent.parent / "resources" / "artifact-frameworks" / "threejs.html"
-    return template.read_text(encoding="utf-8").replace("__TITLE__", html.escape(title))
+    # Detect the scene type from the query for the fallback.
+    from .scene_spec import detect_scene_type, SCENE_TYPES
+    scene_type = detect_scene_type(query)
+    title_map = {
+        "sakura": "Sakura Island",
+        "island": "Voxel Island",
+        "desert": "Deserted Mountain Island",
+        "city": "New York City",
+        "paris": "Paris — Eiffel Tower",
+        "sky_island": "Sky Island Temple",
+    }
+    title = title_map.get(scene_type, "Interactive Three.js World")
+    # Use the multi-scene template with a default sceneSpec for the detected type.
+    template = Path(__file__).parent.parent / "resources" / "artifact-frameworks" / "threejs-multi.html"
+    source = template.read_text(encoding="utf-8").replace("__TITLE__", html.escape(title))
+    # Inject a default sceneSpec so the fallback renders the right scene type.
+    import json as _json
+    default_spec = {
+        "title": title,
+        "sceneType": scene_type,
+        "sky": "#1a1a2e", "fog": "#16213e", "waterDeep": "#0f3460", "waterShallow": "#16537e", "blossom": "#e94560",
+        "terrainRadius": 12, "terrainHeight": 5, "waterSize": 100, "petalCount": 300,
+        "camera": [25, 21, 30],
+        "trees": [{"x": -4, "z": -1, "scale": 1.0}, {"x": 3, "z": -3, "scale": 0.8}, {"x": 2, "z": 5, "scale": 0.6}],
+        "details": ["scenic viewpoint", "decorative element", "ambient lighting"],
+        "motion": {"waterSpeed": 0.65, "petalFallSpeed": 0.8, "cameraOrbitSpeed": 0.035},
+    }
+    encoded = _json.dumps(default_spec, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
+    source = source.replace(
+        "import { OrbitControls } from 'three/addons/controls/OrbitControls.js';",
+        "import { OrbitControls } from 'three/addons/controls/OrbitControls.js';\n\n    const sceneSpec = " + encoded + ";",
+    )
+    source = source.replace("new THREE.Color(0x090d18)", "new THREE.Color(sceneSpec.sky)")
+    source = source.replace("new THREE.FogExp2(0x10182a, 0.018)", "new THREE.FogExp2(sceneSpec.fog, 0.018)")
+    source = source.replace("camera.position.set(25, 21, 30)", "camera.position.set(...sceneSpec.camera)")
+    return source
 
 
 def research_queries(query: str, contract: ArtifactContract, limit: int = 6) -> list[str]:

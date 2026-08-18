@@ -886,7 +886,10 @@ def create_app() -> FastAPI:
             composed_threejs = (
                 contract.artifact_kind == "web"
                 and "three.js" in contract.requested_features
-                and bool({"voxel", "island", "sakura"} & set(contract.requested_features))
+                and bool(
+                    {"voxel", "island", "sakura", "city", "paris", "desert", "sky_island"}
+                    & set(contract.requested_features)
+                )
             )
             session.task_type = "artifact"
             session.contract = contract.public()

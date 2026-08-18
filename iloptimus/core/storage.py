@@ -52,10 +52,26 @@ def atomic_write_json(path: Path, payload: Any) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
-        os.replace(temporary, path)
+        # On Windows, os.replace() can fail with PermissionError if another
+        # process has the target file open for reading. Retry a few times
+        # with a short delay — the lock is transient.
+        import sys as _sys
+        max_retries = 5 if _sys.platform == "win32" else 1
+        for attempt in range(max_retries):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt + 1 >= max_retries:
+                    raise
+                import time as _time
+                _time.sleep(0.1 * (attempt + 1))
     finally:
         if os.path.exists(temporary):
-            os.unlink(temporary)
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def directory_size(path: Path) -> int:
