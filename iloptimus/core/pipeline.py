@@ -89,6 +89,7 @@ class RunConfig:
     grpo_temperature: float = 0.6
     max_seq_length: int = 512
     benchmark_tasks: int = 12
+    benchmark_batch_size: int = 4
     rollouts_per_example: int = 4
     max_reasoning_tokens: int = 256  # reduced from 512 — most IL tasks don't need 512 reasoning tokens
     max_answer_tokens: int = 128  # reduced from 512 — answers are short
@@ -463,6 +464,7 @@ async def _benchmark_stage(
         num_tasks=n,
         max_reasoning_tokens=config.max_reasoning_tokens,
         max_answer_tokens=config.max_answer_tokens,
+        batch_size=config.benchmark_batch_size,
         on_task_complete=on_task_complete,
     )
 

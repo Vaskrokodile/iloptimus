@@ -214,6 +214,7 @@ export interface RunConfig {
   grpo_temperature: number;
   max_seq_length: number;
   benchmark_tasks: number;
+  benchmark_batch_size: number;
   rollouts_per_example: number;
   max_reasoning_tokens: number;
   max_answer_tokens: number;

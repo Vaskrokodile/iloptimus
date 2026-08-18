@@ -282,6 +282,41 @@ class Backend(ABC):
         falling back to a forced second pass when reasoning exhausts its budget.
         """
 
+    def run_batch_inference(
+        self,
+        handle: ModelHandle,
+        prompts: list[str],
+        *,
+        max_reasoning_tokens: int = 512,
+        max_answer_tokens: int = 512,
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        speculative: bool = False,
+        speculative_config: dict | None = None,
+    ) -> list[InferenceResult]:
+        """Run independent prompts while preserving input order.
+
+        Backends with native batching can override this method. The default is
+        intentionally sequential so every backend remains correct before it
+        grows a batch-specific implementation.
+        """
+        results: list[InferenceResult] = []
+        for prompt in prompts:
+            results.append(
+                self.run_two_stage_inference(
+                    handle,
+                    prompt,
+                    max_reasoning_tokens=max_reasoning_tokens,
+                    max_answer_tokens=max_answer_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    speculative=speculative,
+                    speculative_config=speculative_config,
+                )
+            )
+            self.clear_cache(handle)
+        return results
+
     # --- memory / adapters -------------------------------------------------
 
     @abstractmethod

@@ -177,6 +177,7 @@ class CreateRunRequest(BaseModel):
     grpo_temperature: float = 0.6
     max_seq_length: int = 768
     benchmark_tasks: int = 12
+    benchmark_batch_size: int = Field(default=4, ge=1, le=64)
     rollouts_per_example: int = 4
     max_reasoning_tokens: int = 256
     max_answer_tokens: int = 128
@@ -3144,6 +3145,7 @@ def create_app() -> FastAPI:
             grpo_temperature=req.grpo_temperature,
             max_seq_length=req.max_seq_length,
             benchmark_tasks=req.benchmark_tasks,
+            benchmark_batch_size=req.benchmark_batch_size,
             rollouts_per_example=req.rollouts_per_example,
             max_reasoning_tokens=req.max_reasoning_tokens,
             max_answer_tokens=req.max_answer_tokens,

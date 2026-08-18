@@ -807,21 +807,101 @@ def _row_origin(row: dict[str, Any]) -> str:
     )
 
 
-def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Greedily retain rare capabilities and underrepresented source origins.
+def _select_single_feature_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Select one-feature rows with exact greedy ordering in near-linear time.
 
-    Produces exactly the same selection and ordering as the original
-    scan-for-max greedy loop, but uses a lazily updated min-heap so the cost
-    is O((n + limit) log n) instead of O(n * limit). Priorities only decrease
-    as capability/origin counts grow, so a popped entry is either current
-    (accept) or stale (recompute and re-push).
+    The common factory path emits one capability per row. Grouping by
+    capability and source origin means a count update only invalidates the
+    affected groups instead of rescanning every remaining row.
     """
+    import heapq
+
+    feature_counts: Counter[str] = Counter()
+    origin_counts: Counter[str] = Counter()
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    by_feature: dict[str, set[tuple[str, str]]] = {}
+    by_origin: dict[str, set[tuple[str, str]]] = {}
+
+    for index, row in enumerate(rows):
+        feature = str((row.get("features") or [""])[0])
+        origin = _row_origin(row)
+        key = (feature, origin)
+        group = groups.setdefault(key, {"rows": [], "next": 0, "version": 0})
+        group["rows"].append((index, row))
+        by_feature.setdefault(feature, set()).add(key)
+        by_origin.setdefault(origin, set()).add(key)
+
+    for group in groups.values():
+        group["rows"].sort(
+            key=lambda item: (
+                item[1].get("view") == "implementation",
+                float(item[1].get("quality_score") or 0.0),
+                -item[0],
+            ),
+            reverse=True,
+        )
+
+    def candidate(key: tuple[str, str]):
+        feature, origin = key
+        group = groups[key]
+        pointer = group["next"]
+        if pointer >= len(group["rows"]):
+            return None
+        index, row = group["rows"][pointer]
+        return (
+            -1.0 / (1 + feature_counts[feature]),
+            -1.0 / (1 + origin_counts[origin]),
+            0 if row.get("view") == "implementation" else 1,
+            -float(row.get("quality_score") or 0.0),
+            index,
+        )
+
+    def push(key: tuple[str, str], heap: list[tuple[Any, ...]]) -> None:
+        current = candidate(key)
+        if current is not None:
+            feature, origin = key
+            heapq.heappush(
+                heap,
+                (*current, groups[key]["version"], feature, origin),
+            )
+
+    heap: list[tuple[Any, ...]] = []
+    for key in groups:
+        push(key, heap)
+
+    selected: list[tuple[int, dict[str, Any]]] = []
+    while heap and len(selected) < limit:
+        *priority, version, feature, origin = heapq.heappop(heap)
+        key = (feature, origin)
+        group = groups[key]
+        current = candidate(key)
+        if version != group["version"] or current is None or tuple(priority) != current:
+            continue
+
+        index, row = group["rows"][group["next"]]
+        group["next"] += 1
+        selected.append((index, row))
+        feature_counts[feature] += 1
+        origin_counts[origin] += 1
+
+        affected = by_feature[feature] | by_origin[origin]
+        for affected_key in affected:
+            groups[affected_key]["version"] += 1
+            push(affected_key, heap)
+
+    return [row for _, row in sorted(selected)]
+
+
+def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Greedily retain rare capabilities and underrepresented source origins."""
     import heapq
 
     if limit <= 0:
         return []
     if limit >= len(rows):
         return list(rows)
+    if all(len(row.get("features") or []) == 1 for row in rows):
+        return _select_single_feature_rows(rows, limit)
 
     feature_counts: Counter[str] = Counter()
     origin_counts: Counter[str] = Counter()
@@ -833,9 +913,6 @@ def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[st
             for feature in row.get("features", [])
         )
         origin_rarity = 1.0 / (1 + origin_counts[_row_origin(row)])
-        # Min-heap: negate "higher is better" terms; the trailing original
-        # index breaks full ties in favor of the earlier row, matching the
-        # first-occurrence behavior of the original max() scan.
         return (
             -rarity,
             -origin_rarity,

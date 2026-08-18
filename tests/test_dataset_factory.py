@@ -245,6 +245,21 @@ def test_heap_selection_matches_greedy_oracle():
         assert _select_diverse_rows(rows, limit) == _oracle_greedy(rows, limit)
 
 
+def test_single_feature_selection_matches_greedy_oracle():
+    rows = [
+        {
+            "id": i,
+            "features": [FEATURE_POOL[i % len(FEATURE_POOL)]],
+            "source_url": f"https://origin{i % 5}.example/repo{i % 11}",
+            "quality_score": round((i % 29) / 29, 3),
+            "view": "implementation" if i % 3 else "source-unit",
+        }
+        for i in range(180)
+    ]
+    for limit in (1, 17, 60, 140, 179):
+        assert _select_diverse_rows(rows, limit) == _oracle_greedy(rows, limit)
+
+
 def test_heap_selection_scales_to_50k_rows():
     rows = [
         {

@@ -80,6 +80,7 @@ export default function ILStudioPage() {
   const [grpoGroupSize, setGrpoGroupSize] = useState(4);
   const [precision, setPrecision] = useState<string>("");
   const [benchmarkTasks, setBenchmarkTasks] = useState(5);
+  const [benchmarkBatchSize, setBenchmarkBatchSize] = useState(4);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -158,6 +159,7 @@ export default function ILStudioPage() {
         grpo_iters: grpoIters,
         grpo_group_size: grpoGroupSize,
         benchmark_tasks: benchmarkTasks,
+        benchmark_batch_size: benchmarkBatchSize,
       });
       setActiveRunId(result.id);
       setEvents([]);
@@ -319,6 +321,18 @@ export default function ILStudioPage() {
                             onChange={(e) => setBenchmarkTasks(Number(e.target.value))}
                             className="input-base w-full"
                           />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">Benchmark Batch Size</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={64}
+                            value={benchmarkBatchSize}
+                            onChange={(e) => setBenchmarkBatchSize(Math.max(1, Math.min(64, Number(e.target.value) || 1)))}
+                            className="input-base w-full"
+                          />
+                          <p className="text-xs text-fg-muted mt-1">Used by native batched inference backends; safe sequential fallback elsewhere.</p>
                         </div>
                         <div>
                           <label className="text-xs font-medium text-fg-muted mb-1.5 block uppercase tracking-wide">GRPO Group Size</label>

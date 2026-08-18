@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .grader import build_prompt, get_num_tasks, grade_response
-from .inference import ModelHandle, clear_cache, get_memory_info, run_inference
+from .inference import ModelHandle, clear_cache, get_memory_info, run_inference_batch
 
 
 @dataclass
@@ -55,6 +55,7 @@ def run_benchmark(
     max_answer_tokens: int = 512,
     temperature: float = 0.6,
     top_p: float = 0.9,
+    batch_size: int = 4,
     on_task_complete: Callable[[int, int, TaskResult], None] | None = None,
 ) -> BenchmarkResult:
     """Run a real benchmark on a taskset.
@@ -67,6 +68,7 @@ def run_benchmark(
         max_answer_tokens: token budget for answer phase
         temperature: sampling temperature
         top_p: nucleus sampling threshold
+        batch_size: number of prompts to submit together when the backend supports it
         on_task_complete: callback called after each task with (idx, total, result)
 
     Returns:
@@ -74,45 +76,53 @@ def run_benchmark(
     """
     total_available = get_num_tasks(domain)
     n = min(num_tasks or total_available, total_available)
+    batch_size = max(1, int(batch_size))
 
     results: list[TaskResult] = []
-    t0 = time.time()
+    prompts = [build_prompt(domain, index) for index in range(n)]
+    t0 = time.perf_counter()
 
-    for i in range(n):
-        prompt = build_prompt(domain, i)
-        inf = run_inference(
+    for start in range(0, n, batch_size):
+        prompt_batch = prompts[start : start + batch_size]
+        inference_batch = run_inference_batch(
             handle,
-            prompt,
+            prompt_batch,
             max_reasoning_tokens=max_reasoning_tokens,
             max_answer_tokens=max_answer_tokens,
             temperature=temperature,
             top_p=top_p,
         )
+        if len(inference_batch) != len(prompt_batch):
+            raise RuntimeError(
+                "Batch inference returned a different number of results than prompts"
+            )
 
-        graded = grade_response(domain, i, inf.text)
+        for offset, inf in enumerate(inference_batch):
+            task_index = start + offset
+            graded = grade_response(domain, task_index, inf.text)
+            task_result = TaskResult(
+                task_idx=task_index,
+                score=graded.score,
+                correctness=graded.correctness,
+                reasoning_quality=graded.reasoning_quality,
+                elapsed=inf.elapsed,
+                tokens_generated=inf.tokens_generated,
+                tokens_per_sec=inf.tokens_per_sec,
+                forced_answer=inf.forced_answer,
+                response_preview=inf.text[:200],
+                reasoning=inf.reasoning,
+                answer=inf.answer,
+            )
+            results.append(task_result)
 
-        task_result = TaskResult(
-            task_idx=i,
-            score=graded.score,
-            correctness=graded.correctness,
-            reasoning_quality=graded.reasoning_quality,
-            elapsed=inf.elapsed,
-            tokens_generated=inf.tokens_generated,
-            tokens_per_sec=inf.tokens_per_sec,
-            forced_answer=inf.forced_answer,
-            response_preview=inf.text[:200],
-            reasoning=inf.reasoning,
-            answer=inf.answer,
-        )
-        results.append(task_result)
+            if on_task_complete:
+                on_task_complete(task_index, n, task_result)
 
-        if on_task_complete:
-            on_task_complete(i, n, task_result)
-
-        # Clear cache between tasks to manage memory
+        # Clear backend caches between batches. Sequential fallback backends
+        # clear per prompt inside their default batch implementation.
         clear_cache()
 
-    total_elapsed = time.time() - t0
+    total_elapsed = time.perf_counter() - t0
     total_tokens = sum(r.tokens_generated for r in results)
 
     accuracy = sum(r.correctness for r in results) / n if n > 0 else 0.0

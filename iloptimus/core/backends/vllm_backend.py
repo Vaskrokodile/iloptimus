@@ -454,6 +454,57 @@ class VLLMBackend(Backend):
             finish_reason=out.finish_reason or "stop",
         )
 
+    def _vllm_generate_batch(
+        self,
+        handle: ModelHandle,
+        prompts: list[str],
+        *,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
+        stop_strings: Optional[list[str]] = None,
+        stop_token_ids: Optional[list[int]] = None,
+        adapter_path: Optional[str] = None,
+    ) -> list[GenerateResult]:
+        from vllm import SamplingParams
+
+        llm = handle.backend_obj["vllm_llm"]
+        params_kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature if temperature > 0 else 0.0,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
+        }
+        if stop_strings:
+            params_kwargs["stop"] = stop_strings
+        if stop_token_ids:
+            params_kwargs["stop_token_ids"] = stop_token_ids
+
+        lora_request = None
+        if adapter_path and os.path.exists(adapter_path):
+            from vllm import LoRARequest
+
+            lora_request = LoRARequest(
+                lora_name=os.path.basename(adapter_path),
+                lora_int_id=abs(hash(adapter_path)) % (2**31) + 1,
+                lora_path=adapter_path,
+            )
+
+        outputs = llm.generate(prompts, SamplingParams(**params_kwargs), lora_request=lora_request)
+        if len(outputs) != len(prompts):
+            raise RuntimeError(
+                "vLLM returned a different number of results than prompts"
+            )
+        return [
+            GenerateResult(
+                text=output.outputs[0].text,
+                token_ids=list(output.outputs[0].token_ids),
+                finish_reason=output.outputs[0].finish_reason or "stop",
+            )
+            for output in outputs
+        ]
+
     def _hf_generate(
         self,
         handle: ModelHandle,
@@ -682,6 +733,125 @@ class VLLMBackend(Backend):
             tokens_per_sec=tps,
             forced_answer=forced,
         )
+
+    def run_batch_inference(
+        self,
+        handle: ModelHandle,
+        prompts: list[str],
+        *,
+        max_reasoning_tokens: int = 512,
+        max_answer_tokens: int = 512,
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        speculative: bool = False,
+        speculative_config: dict | None = None,
+    ) -> list[InferenceResult]:
+        """Batch the vLLM generation passes while preserving prompt order."""
+        if not prompts:
+            return []
+        llm = handle.backend_obj.get("vllm_llm") if handle.backend_obj else None
+        if llm is None:
+            return super().run_batch_inference(
+                handle,
+                prompts,
+                max_reasoning_tokens=max_reasoning_tokens,
+                max_answer_tokens=max_answer_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                speculative=speculative,
+                speculative_config=speculative_config,
+            )
+
+        messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
+        chat_prompts = [
+            handle.tokenizer.apply_chat_template(
+                item,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for item in messages
+        ]
+        eos_token_id = handle.tokenizer.eos_token_id
+        stop_token_ids = [THINK_CLOSE_TOKEN_ID]
+        if eos_token_id is not None:
+            stop_token_ids.append(eos_token_id)
+
+        started = time.perf_counter()
+        first_results = self._vllm_generate_batch(
+            handle,
+            chat_prompts,
+            max_tokens=max_reasoning_tokens + max_answer_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=1.05,
+            stop_strings=[THINK_CLOSE, EOS],
+            stop_token_ids=stop_token_ids,
+            adapter_path=handle.backend_obj.get("active_adapter_path"),
+        )
+
+        parsed: list[dict[str, Any]] = []
+        forced_prompts: list[str] = []
+        forced_indices: list[int] = []
+        for index, result in enumerate(first_results):
+            raw = result.text.replace(EOS, "")
+            if THINK_CLOSE in raw:
+                reasoning, answer = raw.split(THINK_CLOSE, 1)
+                parsed.append(
+                    {
+                        "reasoning": reasoning.strip(),
+                        "answer": answer.strip(),
+                        "forced": False,
+                        "tokens": len(result.token_ids),
+                    }
+                )
+                continue
+            parsed.append(
+                {
+                    "reasoning": raw.strip(),
+                    "answer": "",
+                    "forced": True,
+                    "tokens": len(result.token_ids),
+                }
+            )
+            forced_indices.append(index)
+            forced_prompts.append(chat_prompts[index] + raw + THINK_CLOSE + "\n")
+
+        if forced_prompts:
+            answer_results = self._vllm_generate_batch(
+                handle,
+                forced_prompts,
+                max_tokens=max_answer_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=1.05,
+                stop_strings=[EOS],
+                stop_token_ids=[eos_token_id] if eos_token_id is not None else None,
+                adapter_path=handle.backend_obj.get("active_adapter_path"),
+            )
+            for index, answer_result in zip(forced_indices, answer_results):
+                parsed[index]["answer"] = answer_result.text.replace(EOS, "").strip()
+                parsed[index]["tokens"] += len(answer_result.token_ids)
+
+        elapsed = time.perf_counter() - started
+        per_result_elapsed = elapsed / max(1, len(prompts))
+        results: list[InferenceResult] = []
+        for item in parsed:
+            reasoning = item["reasoning"]
+            answer = item["answer"]
+            full_text = reasoning + THINK_CLOSE + "\n" + answer if reasoning else answer
+            tokens = max(1, int(item["tokens"]))
+            results.append(
+                InferenceResult(
+                    text=full_text,
+                    reasoning=reasoning,
+                    answer=answer,
+                    elapsed=per_result_elapsed,
+                    tokens_generated=tokens,
+                    tokens_per_sec=tokens / max(per_result_elapsed, 1e-3),
+                    forced_answer=item["forced"],
+                )
+            )
+        return results
 
     # ------------------------------------------------------- memory/adapters
 

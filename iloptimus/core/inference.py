@@ -54,6 +54,7 @@ __all__ = [
     "run_completion",
     "run_function_completion",
     "run_inference",
+    "run_inference_batch",
     "run_inference_speculative",
     "run_json_completion",
     "run_source_completion",
@@ -585,6 +586,36 @@ def run_inference(
     return backend.run_two_stage_inference(
         handle,
         prompt,
+        max_reasoning_tokens=max_reasoning_tokens,
+        max_answer_tokens=max_answer_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        speculative=speculative,
+        speculative_config=speculative_config,
+    )
+
+
+def run_inference_batch(
+    handle: ModelHandle,
+    prompts: list[str],
+    max_reasoning_tokens: int = 512,
+    max_answer_tokens: int = 512,
+    temperature: float = 0.6,
+    top_p: float = 0.9,
+    speculative: bool = False,
+    speculative_config: dict | None = None,
+) -> list[InferenceResult]:
+    """Run independent prompts through the backend's batch path.
+
+    The returned list always matches the order of ``prompts``. Backends without
+    a native batch implementation use the correct sequential fallback.
+    """
+    if not prompts:
+        return []
+    backend = _backend_for(handle)
+    return backend.run_batch_inference(
+        handle,
+        prompts,
         max_reasoning_tokens=max_reasoning_tokens,
         max_answer_tokens=max_answer_tokens,
         temperature=temperature,
