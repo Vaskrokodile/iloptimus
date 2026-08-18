@@ -906,3 +906,19 @@
   .optimus-map-detail ul { margin-top: 13px; }
   .optimus-map-detail li { padding: 7px 0; }
 }
+
+/* Preflight validation panel for Optimus Lab */
+.preflight-panel { margin: 10px 0; padding: 16px 18px; border-radius: 14px; border: 1px solid rgba(var(--border-base),.12); }
+.preflight-panel.preflight-pass { border-color: rgba(69,203,164,.3); background: rgba(69,203,164,.06); }
+.preflight-panel.preflight-block { border-color: rgba(239,68,68,.3); background: rgba(239,68,68,.06); }
+.preflight-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
+.preflight-head strong { font-size: 11px; color: rgb(var(--text-primary)); }
+.preflight-head span { font-size: 9px; color: rgb(var(--text-muted)); letter-spacing: .04em; }
+.preflight-checks { display: flex; flex-direction: column; gap: 7px; }
+.preflight-check { display: flex; align-items: flex-start; gap: 8px; font-size: 10px; line-height: 1.5; color: rgb(var(--text-secondary)); }
+.preflight-check strong { color: rgb(var(--text-primary)); font-weight: 700; }
+.preflight-icon { display: flex; flex: 0 0 auto; width: 16px; height: 16px; align-items: center; justify-content: center; border-radius: 50%; margin-top: 1px; }
+.preflight-icon svg { width: 10px; height: 10px; }
+.preflight-pass .preflight-icon { background: rgba(69,203,164,.15); color: #45cba4; }
+.preflight-warn .preflight-icon { background: rgba(245,158,11,.15); color: #f59e0b; }
+.preflight-block .preflight-icon { background: rgba(239,68,68,.15); color: #ef7777; }
