@@ -237,7 +237,15 @@ class MLXBackend(Backend):
             verbose=False,
         )
         mx.clear_cache()
-        return GenerateResult(text=text)
+        # mlx_lm.generate does not expose finish_reason. Infer it: if the
+        # decoded text tokenizes to >= max_tokens, the budget was exhausted
+        # (length); otherwise the model stopped naturally (stop / EOS).
+        try:
+            gen_token_count = len(handle.tokenizer.encode(text))
+            finish_reason = "length" if gen_token_count >= max_tokens else "stop"
+        except Exception:
+            finish_reason = "stop"
+        return GenerateResult(text=text, finish_reason=finish_reason)
 
     def stream_generate(
         self,
@@ -418,10 +426,16 @@ class MLXBackend(Backend):
 
             if not think_done:
                 reasoning_tokens.append(token_id)
-                if token_id == THINK_CLOSE_TOKEN_ID or token_id == eos_token_id:
+                if token_id == THINK_CLOSE_TOKEN_ID:
                     think_done = True
                     if len(all_tokens) >= max_reasoning_tokens:
                         forced = True
+                elif token_id == eos_token_id:
+                    # Model stopped at EOS during reasoning without closing
+                    # the think tag. The text so far is reasoning, not an
+                    # answer — force a second pass to get the actual answer.
+                    think_done = True
+                    forced = True
                 elif len(reasoning_tokens) >= max_reasoning_tokens:
                     think_done = True
                     forced = True
@@ -441,7 +455,7 @@ class MLXBackend(Backend):
             from mlx_lm import generate
 
             chat_text = handle.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            forced_prompt = chat_text + reasoning_text + THINK_CLOSE + "\n<answer>The answer is "
+            forced_prompt = chat_text + reasoning_text + THINK_CLOSE + "\n"
             out2 = generate(
                 handle.model,
                 handle.tokenizer,
@@ -452,7 +466,7 @@ class MLXBackend(Backend):
             out2 = out2.strip()
             if EOS in out2:
                 out2 = out2.replace(EOS, "").strip()
-            full_text = reasoning_text + THINK_CLOSE + "\n<answer>The answer is " + out2 + "</answer>"
+            full_text = reasoning_text + THINK_CLOSE + "\n" + out2
         else:
             answer_text = handle.tokenizer.decode(answer_tokens)
             if EOS in answer_text:
@@ -908,28 +922,42 @@ class EagerCompletionDataset:
         return len(self.rows)
 
 
+def _completion_row_tokens(row: dict[str, str], tokenizer: Any) -> tuple[list[int], int]:
+    """Tokenize one prompt/completion row and return ``(tokens, offset)``.
+
+    Backend-independent re-implementation of the offset computation that
+    ``mlx_lm.tuner.datasets.CompletionsDataset.process`` performs: render the
+    prompt alone for the offset, then prompt+completion for the full sequence.
+    Keeping this local means SFT data preparation works on every backend
+    (including the torch/CUDA path on platforms without ``mlx_lm``).
+    """
+    prompt = str(row.get("prompt") or "")
+    completion = str(row.get("completion") or "")
+    prompt_tokens = list(
+        tokenizer.apply_chat_template([{"role": "user", "content": prompt}])
+    )
+    full_tokens = list(
+        tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": completion},
+            ]
+        )
+    )
+    return full_tokens, len(prompt_tokens)
+
+
 def _tokenize_sft_rows(
     rows: list[dict[str, str]], tokenizer: Any, *, max_seq_length: int, mask_prompt: bool = True
 ) -> tuple[EagerCompletionDataset, dict[str, Any]]:
     """Tokenize once and prove how much supervised completion survives truncation."""
-    from mlx_lm.tuner.datasets import CompletionsDataset
-
-    source = CompletionsDataset(
-        rows,
-        tokenizer,
-        prompt_key="prompt",
-        completion_key="completion",
-        mask_prompt=mask_prompt,
-    )
     tokenized: list[tuple[list[int], int]] = []
     total_completion_tokens = 0
     retained_completion_tokens = 0
     fully_retained = 0
     sequence_lengths: list[int] = []
     for row in rows:
-        tokens, offset = source.process(row)
-        tokens = list(tokens)
-        offset = int(offset)
+        tokens, offset = _completion_row_tokens(row, tokenizer)
         completion_tokens = max(0, len(tokens) - offset)
         retained_tokens = max(0, min(len(tokens), max_seq_length) - min(offset, max_seq_length))
         total_completion_tokens += completion_tokens

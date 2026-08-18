@@ -5,7 +5,7 @@ import { ArrowUp, Bot, BrainCircuit, Check, ChevronDown, Copy, Database, Externa
 import { createEnvironmentFromChat, createRsiPanels, getContextEstimate, getLearningSession, getModels, sendChat, streamLearningEvents, type ContextEstimate, type LearningSession, type ModelInfo } from "../api/client";
 import { refreshWorkspaceTabs } from "../components/WorkspaceTabs";
 
-type Message = { role: "user" | "assistant"; text: string; skills?: string[]; tools?: string[]; tps?: number; panelIds?: string[]; learningId?: string };
+type Message = { role: "user" | "assistant"; text: string; reasoning?: string; skills?: string[]; tools?: string[]; tps?: number; panelIds?: string[]; learningId?: string };
 
 const starters = [
   "Design an IL pipeline for mathematical reasoning",
@@ -127,6 +127,7 @@ export default function ChatPage() {
       setMessages((current) => [...current, {
         role: "assistant",
         text: response.answer,
+        reasoning: response.reasoning || undefined,
         skills: response.active_skills.map((skill) => skill.name),
         tools: response.tool_calls.map((tool) => tool.name),
         tps: response.tokens_per_sec,

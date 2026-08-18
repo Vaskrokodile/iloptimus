@@ -24,6 +24,11 @@ class ModelInfo:
     backends: list[str] = field(default_factory=lambda: ["mlx", "vllm"])
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    # When set, this model is a base-model + LoRA-adapter pair: the base is
+    # downloaded from ``huggingface_id`` and the adapter from ``adapter_repo``.
+    # On the MLX backend the adapter loads natively; on the vLLM/CUDA backend
+    # it is transparently converted from MLX to PEFT format at load time.
+    adapter_repo: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +60,19 @@ MODELS: list[ModelInfo] = [
         backends=["mlx", "vllm"],
         description="Continued LoRA training of DeepSeek-R1-Distill-Qwen-1.5B with 3 rounds of IL v9 self-improvement. HumanEval 7.3% -> 11.0%.",
         tags=["reasoning", "recommended", "il-improved"],
+    ),
+    ModelInfo(
+        id="boosted-v1-small",
+        name="Boosted-v1-small",
+        huggingface_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        adapter_repo="Akahsizrr/boosted-v1-small",
+        params_b=1.5,
+        fp16_gb=3.5, fp32_gb=6.5, int8_gb=2.0, int4_gb=1.2,
+        family="deepseek-r1-distill",
+        context_length=131072,
+        backends=["mlx", "vllm"],
+        description="MLX LoRA adapter for DeepSeek-R1-Distill-Qwen-1.5B trained via the iloptimus self-improvement pipeline on HumanEval v1. HumanEval 24.0% -> 70.88% (+46.88%).",
+        tags=["reasoning", "recommended", "il-improved", "humaneval"],
     ),
     ModelInfo(
         id="deepseek-r1-distill-qwen-7b",

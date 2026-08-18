@@ -12,13 +12,15 @@ dependencies = [
     "mlx-lm>=0.31.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-dspark>=0.7.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # NVIDIA/CUDA path: HF Transformers + PEFT for LoRA/QLoRA training and
-    # logprob computation. vLLM itself is an optional extra (linux only) because
-    # it is heavy and CUDA-specific; the vllm backend lazily imports it.
-    "torch>=2.3.0; sys_platform == 'linux'",
-    "transformers>=4.45.0; sys_platform == 'linux'",
-    "peft>=0.11.0; sys_platform == 'linux'",
-    "accelerate>=0.34.0; sys_platform == 'linux'",
-    "safetensors>=0.4.0; sys_platform == 'linux'",
+    # logprob computation. These have Windows CUDA wheels alongside Linux.
+    # vLLM itself is an optional extra (linux only) because it does not build
+    # on Windows; the vllm backend lazily imports it and falls back to HF
+    # model.generate when it is absent.
+    "torch>=2.3.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    "transformers>=4.45.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    "peft>=0.11.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    "accelerate>=0.34.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    "safetensors>=0.4.0; sys_platform == 'linux' or sys_platform == 'win32'",
     "huggingface-hub>=0.24.0",
     "numpy>=1.24.0",
     "mcp>=1.27,<2",
@@ -28,9 +30,10 @@ dependencies = [
 [project.optional-dependencies]
 # vLLM gives the CUDA backend high-throughput batched inference. Install with
 # `uv pip install 'iloptimus[cuda]'` on a Linux machine with NVIDIA GPUs.
+# vLLM is Linux-only (no Windows builds); bitsandbytes ships Windows wheels.
 cuda = [
     "vllm>=0.6.0; sys_platform == 'linux'",
-    "bitsandbytes>=0.43.0; sys_platform == 'linux'",
+    "bitsandbytes>=0.43.0; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 # Legacy alias kept for backward compatibility.
 vllm = ["vllm>=0.6.0; sys_platform == 'linux'"]

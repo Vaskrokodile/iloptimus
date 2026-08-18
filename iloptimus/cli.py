@@ -10,7 +10,57 @@ import time
 import webbrowser
 
 
+def _ensure_utf8_stdout() -> None:
+    """Reconfigure stdout/stderr to UTF-8.
+
+    On Windows the default console encoding is cp1252, which cannot encode
+    the Unicode box-drawing characters used in the startup banner (or any
+    non-Latin-1 output from the pipeline). Python 3.7+ supports
+    ``reconfigure`` on the text stream wrapper; if it is unavailable we
+    silently fall back to the platform default.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
+
+def _ensure_disk_env() -> None:
+    """Redirect temp/cache dirs to the data drive on Windows.
+
+    The C: drive on this machine is space-constrained. torch.compile's
+    inductor cache and the OS temp dir can fill it up and crash compilation.
+    Redirect them to the ILOPTIMUS_HOME drive (E:) if that env var is set.
+    """
+    import os
+
+    home = os.environ.get("ILOPTIMUS_HOME")
+    if not home:
+        return
+    home = os.path.abspath(home)
+    # Only redirect if the home dir is on a different drive than the system temp
+    sys_temp = os.environ.get("TEMP", os.environ.get("TMP", ""))
+    if sys_temp and os.path.exists(sys_temp):
+        sys_drive = os.path.splitdrive(sys_temp)[0]
+        home_drive = os.path.splitdrive(home)[0]
+        if sys_drive != home_drive:
+            tmp_dir = os.path.join(home, "..", "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+            os.environ["TEMP"] = tmp_dir
+            os.environ["TMP"] = tmp_dir
+            os.environ["TMPDIR"] = tmp_dir
+    # Always set the inductor cache to the data drive
+    inductor_cache = os.path.join(home, "..", "torch-inductor-cache")
+    os.makedirs(inductor_cache, exist_ok=True)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+
+
 def main():
+    _ensure_utf8_stdout()
+    _ensure_disk_env()
     parser = argparse.ArgumentParser(
         prog="iloptimus",
         description="IL Optimus — run Intuition Learning pipelines locally with a web frontend.",

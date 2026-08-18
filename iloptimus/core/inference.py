@@ -92,24 +92,28 @@ def run_completion(
         # still split evenly so they retain answer room.
         reasoning_budget = max(32, int(max_tokens * (0.75 if max_tokens >= 256 else 0.5)))
         answer_budget = max(32, max_tokens - reasoning_budget)
-        first = backend.generate(
+        first_result = backend.generate(
             handle,
             chat_text,
             max_tokens=reasoning_budget,
             temperature=temperature,
             repetition_penalty=1.05,
             repetition_context_size=128,
-        ).text.strip()
+        )
+        first = first_result.text.strip()
         if THINK_CLOSE in first:
             reasoning, text = first.split(THINK_CLOSE, 1)
             text = text.strip()
         else:
+            # No think-close tag. The text so far is reasoning — whether the
+            # model stopped at EOS or exhausted the budget, we need to close
+            # the think phase and let it generate the actual answer freely.
+            # We do NOT inject a "The answer is" prefix: that caused the model
+            # to complete the sentence with a random number.
             reasoning = first
             text = ""
         if not text:
-            # DeepSeek-R1 often consumes a short completion entirely in thought.
-            # Close that phase and let it emit the real answer or tool object. We
-            # intentionally add no answer prefix or fabricated content.
+            # Close the think phase and let the model emit the real answer.
             answer_prompt = chat_text + first + ("" if THINK_CLOSE in first else THINK_CLOSE) + "\n"
             text = backend.generate(
                 handle,
@@ -433,6 +437,7 @@ def load_model(
     dequantize: bool = False,
     source_override: Optional[str] = None,
     backend: Optional[str] = None,
+    merge_adapter: bool = True,
 ) -> ModelHandle:
     """Load a model via the active backend.
 
@@ -440,18 +445,36 @@ def load_model(
     omitted it is resolved from the detected hardware. The MLX backend supports
     a ``dequantize`` legacy path; the vLLM backend ignores it (QLoRA on CUDA
     uses bitsandbytes NF4 directly).
+
+    ``merge_adapter`` controls whether a loaded LoRA adapter is merged into
+    the base model (inference optimization) or kept as a separate PEFT wrapper
+    (needed for cumulative training — SFT trains the existing LoRA layers
+    further instead of creating new ones). Defaults to True for inference
+    speed; set to False when loading for training.
     """
     from .backends import resolve_backend
 
     name = resolve_backend(preferred=backend) if backend else resolve_backend()
     impl = get_backend(name)
-    handle = impl.load(
-        huggingface_id=huggingface_id,
-        precision=precision,
-        adapter_path=adapter_path,
-        cache_dir=cache_dir,
-        source_override=source_override,
-    )
+    # Pass merge_adapter to the backend's load method if it supports it.
+    try:
+        handle = impl.load(
+            huggingface_id=huggingface_id,
+            precision=precision,
+            adapter_path=adapter_path,
+            cache_dir=cache_dir,
+            source_override=source_override,
+            merge_adapter=merge_adapter,
+        )
+    except TypeError:
+        # Backend doesn't support merge_adapter yet — fall back to old signature.
+        handle = impl.load(
+            huggingface_id=huggingface_id,
+            precision=precision,
+            adapter_path=adapter_path,
+            cache_dir=cache_dir,
+            source_override=source_override,
+        )
     # Legacy dequantize hook (MLX-only). QLoRA makes this unnecessary on both
     # backends, but it is kept for backward compatibility.
     if dequantize and name == "mlx" and handle.quantized:

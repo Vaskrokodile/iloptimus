@@ -1,0 +1,63 @@
+[{"stream_name":"stdout","time":1.376471952,"data":"============================================================\n"}
+,{"stream_name":"stdout","time":1.376531119,"data":"Installing dependencies...\n"}
+,{"stream_name":"stdout","time":1.376537246,"data":"============================================================\n"}
+,{"stream_name":"stderr","time":11.324196724,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":11.324266402,"data":"    Found GPU0 Tesla P100-PCIE-16GB which is of cuda capability 6.0.\n"}
+,{"stream_name":"stderr","time":11.324274717,"data":"    Minimum and Maximum cuda capability supported by this version of PyTorch is\n"}
+,{"stream_name":"stderr","time":11.32427749,"data":"    (7.0) - (12.0)\n"}
+,{"stream_name":"stderr","time":11.324279832,"data":"    \n"}
+,{"stream_name":"stderr","time":11.32428217,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":11.324284534,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":11.324287042,"data":"    Please install PyTorch with a following CUDA\n"}
+,{"stream_name":"stderr","time":11.324289323,"data":"    configurations:  12.6 following instructions at\n"}
+,{"stream_name":"stderr","time":11.324291682,"data":"    https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":11.324294027,"data":"    \n"}
+,{"stream_name":"stderr","time":11.324296243,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":11.324411122,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":11.32441828,"data":"Tesla P100-PCIE-16GB with CUDA capability sm_60 is not compatible with the current PyTorch installation.\n"}
+,{"stream_name":"stderr","time":11.324422174,"data":"The current PyTorch install supports CUDA capabilities sm_70 sm_75 sm_80 sm_86 sm_90 sm_100 sm_120.\n"}
+,{"stream_name":"stderr","time":11.324426588,"data":"If you want to use the Tesla P100-PCIE-16GB GPU with PyTorch, please check the instructions at https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":11.324431345,"data":"\n"}
+,{"stream_name":"stderr","time":11.324435192,"data":"  queued_call()\n"}
+,{"stream_name":"stdout","time":11.326387552,"data":"GPU compute capability: 6.0\n"}
+,{"stream_name":"stdout","time":11.326400348,"data":"P100 detected — installing PyTorch 2.4.1+cu121 for sm_60 support...\n"}
+,{"stream_name":"stdout","time":30.563486894,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 798.9/798.9 MB 2.2 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":33.631178598,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.1/7.1 MB 111.1 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":33.87324985,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 23.7/23.7 MB 235.9 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":34.014816876,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 823.6/823.6 kB 229.3 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":34.130388888,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.1/14.1 MB 238.6 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":42.34041493,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 664.8/664.8 MB 2.4 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":46.744675264,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 410.6/410.6 MB 87.2 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":49.21043118,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 121.6/121.6 MB 151.2 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":49.916338448,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.5/56.5 MB 173.4 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":50.775390409,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 124.2/124.2 MB 142.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":52.059796818,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 196.0/196.0 MB 105.9 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":53.486274674,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 176.2/176.2 MB 120.0 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":55.061842772,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 99.1/99.1 kB 101.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":57.090717867,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 209.5/209.5 MB 8.9 MB/s eta 0:00:00\n"}
+,{"stream_name":"stderr","time":178.391945335,"data":"ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\n"}
+,{"stream_name":"stderr","time":178.391977365,"data":"torchaudio 2.10.0+cu128 requires torch==2.10.0, but you have torch 2.4.1+cu121 which is incompatible.\n"}
+,{"stream_name":"stderr","time":182.139934714,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":182.139968436,"data":"  File \"/kaggle/src/script.py\", line 47, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":182.139978934,"data":"    importlib.reload(torch)\n"}
+,{"stream_name":"stderr","time":182.140167051,"data":"  File \"/usr/lib/python3.12/importlib/__init__.py\", line 131, in reload\n"}
+,{"stream_name":"stderr","time":182.141769874,"data":"    _bootstrap._exec(spec, module)\n"}
+,{"stream_name":"stderr","time":182.141785555,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 866, in _exec\n"}
+,{"stream_name":"stderr","time":182.141892664,"data":"  File \"\u003cfrozen importlib._bootstrap_external\u003e\", line 999, in exec_module\n"}
+,{"stream_name":"stderr","time":182.141904282,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 488, in _call_with_frames_removed\n"}
+,{"stream_name":"stderr","time":182.141909733,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/__init__.py\", line 2164, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":182.142343427,"data":"    class _TritonLibrary:\n"}
+,{"stream_name":"stderr","time":182.142354072,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/__init__.py\", line 2165, in _TritonLibrary\n"}
+,{"stream_name":"stderr","time":182.142788828,"data":"    lib = torch.library.Library(\"triton\", \"DEF\")\n"}
+,{"stream_name":"stderr","time":182.142916555,"data":"          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":182.142934859,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/library.py\", line 101, in __init__\n"}
+,{"stream_name":"stderr","time":182.143140292,"data":"    \n"}
+,{"stream_name":"stderr","time":182.143155437,"data":"    \n"}
+,{"stream_name":"stderr","time":182.143164091,"data":"RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton; please put all of your definitions in a single TORCH_LIBRARY block.  If you were trying to specify implementations, consider using TORCH_LIBRARY_IMPL (which can be duplicated).  If you really intended to define operators for a single namespace in a distributed way, you can use TORCH_LIBRARY_FRAGMENT to explicitly indicate this.  Previous registration of TORCH_LIBRARY was registered at /usr/local/lib/python3.12/dist-packages/torch/__init__.py:2805; latest registration was registered at /usr/local/lib/python3.12/dist-packages/torch/__init__.py:2165\n"}
+,{"stream_name":"stderr","time":187.331844937,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":187.33190166,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":187.745929558,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":187.745953492,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":189.140681428,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":190.804151647,"data":"[NbConvertApp] Writing 348554 bytes to __results__.html\n"}
+]

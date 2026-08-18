@@ -14,9 +14,43 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from .dedup import ExactJaccardGuard, MinHashDuplicateGuard
 from .storage import app_home, atomic_write_json
 
 WORKSPACE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+@dataclass(frozen=True)
+class CurationConfig:
+    """Caps and thresholds for dataset curation.
+
+    ``LEGACY_CURATION`` reproduces the original session-scale behavior
+    exactly: the 2,048-row cap, 3 rows per source, exact O(n^2) Jaccard
+    de-duplication. ``FACTORY_CURATION`` lifts the caps for corpus-scale
+    curation while keeping every quality gate active, and switches
+    near-duplicate detection to MinHash/LSH so filtering stays sub-quadratic
+    at tens of thousands of rows.
+    """
+
+    maximum_rows: int = 2_048
+    near_duplicate_threshold: float = 0.84
+    minimum_response_chars: int = 220
+    minimum_quality_score: float = 0.5
+    max_per_source: int = 3
+    max_per_origin_fraction: float = 0.2
+    max_per_origin_floor: int = 6
+    # MinHash/LSH near-duplicate detection instead of exact Jaccard scans.
+    minhash_dedup: bool = False
+
+
+LEGACY_CURATION = CurationConfig()
+FACTORY_CURATION = CurationConfig(
+    maximum_rows=250_000,
+    max_per_source=64,
+    max_per_origin_fraction=0.5,
+    max_per_origin_floor=64,
+    minhash_dedup=True,
+)
 
 
 @dataclass(frozen=True)
@@ -312,8 +346,21 @@ def filter_dataset(
     minimum_response_chars: int = 220,
     maximum_rows: int = 512,
     minimum_quality_score: float = 0.5,
+    config: CurationConfig | None = None,
 ) -> dict[str, Any]:
-    """Remove exact/near duplicates, contamination, tiny rows, and source domination."""
+    """Remove exact/near duplicates, contamination, tiny rows, and source domination.
+
+    With ``config=None`` the original session-scale behavior runs unchanged
+    (2,048-row cap, exact Jaccard scans). Passing a ``CurationConfig`` (e.g.
+    ``FACTORY_CURATION``) switches to the streaming, sub-quadratic
+    implementation so corpus-scale datasets can be filtered in bounded time;
+    the config's fields then govern all thresholds and the scalar keyword
+    arguments are ignored.
+    """
+    if config is not None:
+        return _filter_dataset_streaming(
+            workspace_id, holdout_task=holdout_task, config=config
+        )
     root = dataset_workspace(workspace_id)
     input_path = root / "dataset-expanded.jsonl"
     if not input_path.exists():
@@ -422,6 +469,166 @@ def filter_dataset(
     return {**audit.public(), "workspace_id": workspace_id, "path": str(output_path)}
 
 
+def _filter_dataset_streaming(
+    workspace_id: str,
+    *,
+    holdout_task: str,
+    config: CurationConfig,
+) -> dict[str, Any]:
+    """Streaming, sub-quadratic implementation of ``filter_dataset``.
+
+    Rows are never all held in memory: pass 1 scans byte offsets and
+    lightweight sort fields, pass 2 seeks to each row in rare-first order and
+    applies the same gates with the same ordering as the legacy path.
+    Near-duplicate detection uses MinHash/LSH when ``config.minhash_dedup``
+    is set, otherwise the exact Jaccard guard.
+    """
+    root = dataset_workspace(workspace_id)
+    input_path = root / "dataset-expanded.jsonl"
+    if not input_path.exists():
+        input_path = root / "dataset-raw.jsonl"
+
+    # Pass 1 — lightweight scan: byte offsets plus the fields the rare-first
+    # sort needs. Rows themselves stay on disk.
+    offsets: list[int] = []
+    sort_fields: list[tuple[list[str], str, float]] = []
+    feature_frequency: Counter[str] = Counter()
+    with input_path.open("rb") as handle:
+        while True:
+            offset = handle.tell()
+            raw_line = handle.readline()
+            if not raw_line:
+                break
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            features = [str(feature) for feature in payload.get("features", [])]
+            offsets.append(offset)
+            sort_fields.append(
+                (
+                    features,
+                    str(payload.get("curriculum_role") or ""),
+                    float(payload.get("quality_score") or 0.0),
+                )
+            )
+            feature_frequency.update(features)
+    input_rows = len(offsets)
+
+    # Same rare-first reservation order as the legacy path.
+    order = sorted(
+        range(input_rows),
+        key=lambda index: (
+            min(
+                (feature_frequency[feature] for feature in sort_fields[index][0]),
+                default=10**9,
+            ),
+            sort_fields[index][1] != "remediation",
+            -sort_fields[index][2],
+            index,
+        ),
+    )
+
+    guard: ExactJaccardGuard | MinHashDuplicateGuard
+    if config.minhash_dedup:
+        guard = MinHashDuplicateGuard(threshold=config.near_duplicate_threshold)
+    else:
+        guard = ExactJaccardGuard(threshold=config.near_duplicate_threshold)
+
+    holdout = _normalize(holdout_task)
+    max_per_source = config.max_per_source
+    max_per_origin = max(
+        config.max_per_origin_floor,
+        math.ceil(config.maximum_rows * config.max_per_origin_fraction),
+    )
+
+    accepted: list[dict[str, Any]] = []
+    exact: set[str] = set()
+    source_counts: Counter[str] = Counter()
+    origin_counts: Counter[str] = Counter()
+    exact_duplicates = near_duplicates = contaminated = short = repetitive = low_quality = source_dominated = 0
+
+    # Pass 2 — apply the gates in legacy order, seeking row by row.
+    with input_path.open("rb") as handle:
+        for index in order:
+            handle.seek(offsets[index])
+            row = json.loads(handle.readline().decode("utf-8", errors="replace"))
+            response = str(row.get("ideal_response") or "").strip()
+            if len(response) < config.minimum_response_chars:
+                short += 1
+                continue
+            normalized = _normalize(response)
+            if holdout and holdout in normalized:
+                contaminated += 1
+                continue
+            if _line_diversity(response) < 0.45:
+                repetitive += 1
+                continue
+            quality_score = float(
+                row.get("quality_score") or score_source_unit(response, row.get("features", []))
+            )
+            if quality_score < config.minimum_quality_score:
+                low_quality += 1
+                continue
+            digest = hashlib.sha256(normalized.encode()).hexdigest()
+            if digest in exact:
+                exact_duplicates += 1
+                continue
+            source = str(row.get("source_url") or row.get("source_hash") or "unknown")
+            origin = str(row.get("source_origin") or _source_origin(source) or source)
+            if source_counts[source] >= max_per_source:
+                source_dominated += 1
+                continue
+            if origin_counts[origin] >= max_per_origin:
+                source_dominated += 1
+                continue
+            if guard.is_duplicate(response):
+                near_duplicates += 1
+                continue
+            exact.add(digest)
+            source_counts[source] += 1
+            origin_counts[origin] += 1
+            accepted.append({**row, "quality_score": quality_score, "row_sha256": digest})
+
+    quality_rows = len(accepted)
+    maximum_rows = max(24, config.maximum_rows)
+    if len(accepted) > maximum_rows:
+        accepted = _select_diverse_rows(accepted, maximum_rows)
+    capped_rows = quality_rows - len(accepted)
+    output_path = root / "dataset-filtered.jsonl"
+    _write_jsonl(output_path, accepted)
+    dataset_hash = hashlib.sha256(output_path.read_bytes()).hexdigest()
+    audit = DatasetAudit(
+        input_rows=input_rows,
+        quality_rows=quality_rows,
+        accepted_rows=len(accepted),
+        exact_duplicates=exact_duplicates,
+        near_duplicates=near_duplicates,
+        contaminated_rows=contaminated,
+        short_rows=short,
+        repetitive_rows=repetitive,
+        low_quality_rows=low_quality,
+        source_dominated_rows=source_dominated,
+        capped_rows=capped_rows,
+        source_count=len({str(row.get("source_url") or "") for row in accepted}),
+        origin_count=len({str(row.get("source_origin") or _source_origin(str(row.get("source_url") or ""))) for row in accepted}),
+        mean_quality_score=round(
+            sum(float(row.get("quality_score") or 0.0) for row in accepted) / max(1, len(accepted)), 4
+        ),
+        minimum_quality_score=round(
+            min((float(row.get("quality_score") or 0.0) for row in accepted), default=0.0), 4
+        ),
+        dataset_sha256=dataset_hash,
+    )
+    atomic_write_json(root / "dataset-audit.json", audit.public())
+    return {**audit.public(), "workspace_id": workspace_id, "path": str(output_path)}
+
+
 def load_filtered_dataset(workspace_id: str) -> list[dict[str, Any]]:
     return _read_jsonl(dataset_workspace(workspace_id) / "dataset-filtered.jsonl")
 
@@ -443,8 +650,15 @@ def curate_dataset(
     chunk_chars: int = 2_400,
     minimum_response_chars: int = 1_000,
     minimum_quality_score: float = 0.5,
+    config: CurationConfig | None = None,
 ) -> dict[str, Any]:
-    """Run the deterministic assemble/expand/filter/audit pipeline in one tool call."""
+    """Run the deterministic assemble/expand/filter/audit pipeline in one tool call.
+
+    ``config=None`` preserves the legacy session-scale behavior. Passing a
+    ``CurationConfig`` (e.g. ``FACTORY_CURATION``) makes the filtering stage
+    use the config's caps and the streaming sub-quadratic path; ``maximum_rows``
+    then comes from the config as well.
+    """
     started = datetime.now(UTC)
     assembly = assemble_dataset(
         workspace_id,
@@ -456,13 +670,27 @@ def curate_dataset(
         priority_features=priority_features,
     )
     expansion = expand_dataset(workspace_id, target_examples=expanded_examples)
-    filtering = filter_dataset(
-        workspace_id,
-        holdout_task=task,
-        minimum_response_chars=minimum_response_chars,
-        maximum_rows=maximum_rows,
-        minimum_quality_score=minimum_quality_score,
-    )
+    if config is not None:
+        filtering = filter_dataset(
+            workspace_id,
+            holdout_task=task,
+            config=config,
+        )
+    else:
+        filtering = filter_dataset(
+            workspace_id,
+            holdout_task=task,
+            minimum_response_chars=minimum_response_chars,
+            maximum_rows=maximum_rows,
+            minimum_quality_score=minimum_quality_score,
+        )
+    # Workspace paths are useful at the filter API boundary but are not part
+    # of the deterministic quality audit. Keeping them out of the curation
+    # manifest makes identical inputs compare equal across workspaces.
+    filtering_path = filtering.get("path")
+    filtering = {
+        key: value for key, value in filtering.items() if key not in {"workspace_id", "path"}
+    }
     coverage = audit_feature_coverage(load_filtered_dataset(workspace_id), requested_features)
     result = {
         "version": 1,
@@ -470,6 +698,7 @@ def curate_dataset(
         "assembly": assembly,
         "expansion": expansion,
         "filtering": filtering,
+        "filtered_dataset_path": filtering_path,
         "feature_coverage": coverage,
         "elapsed_ms": round((datetime.now(UTC) - started).total_seconds() * 1_000),
     }
@@ -569,44 +798,65 @@ def score_source_unit(text: str, features: Iterable[str] = ()) -> float:
     return round(max(0.0, min(1.0, score)), 4)
 
 
+def _row_origin(row: dict[str, Any]) -> str:
+    return str(
+        row.get("source_origin")
+        or _source_origin(str(row.get("source_url") or ""))
+        or row.get("source_hash")
+        or "unknown"
+    )
+
+
 def _select_diverse_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Greedily retain rare capabilities and underrepresented source origins."""
-    remaining = list(enumerate(rows))
-    selected: list[tuple[int, dict[str, Any]]] = []
-    origin_counts: Counter[str] = Counter()
+    """Greedily retain rare capabilities and underrepresented source origins.
+
+    Produces exactly the same selection and ordering as the original
+    scan-for-max greedy loop, but uses a lazily updated min-heap so the cost
+    is O((n + limit) log n) instead of O(n * limit). Priorities only decrease
+    as capability/origin counts grow, so a popped entry is either current
+    (accept) or stale (recompute and re-push).
+    """
+    import heapq
+
+    if limit <= 0:
+        return []
+    if limit >= len(rows):
+        return list(rows)
+
     feature_counts: Counter[str] = Counter()
-    while remaining and len(selected) < limit:
-        best_position = max(
-            range(len(remaining)),
-            key=lambda position: (
-                sum(1.0 / (1 + feature_counts[str(feature)]) for feature in remaining[position][1].get("features", [])),
-                1.0
-                / (
-                    1
-                    + origin_counts[
-                        str(
-                            remaining[position][1].get("source_origin")
-                            or _source_origin(str(remaining[position][1].get("source_url") or ""))
-                            or remaining[position][1].get("source_hash")
-                            or "unknown"
-                        )
-                    ]
-                ),
-                remaining[position][1].get("view") == "implementation",
-                float(remaining[position][1].get("quality_score") or 0.0),
-                -remaining[position][0],
-            ),
+    origin_counts: Counter[str] = Counter()
+
+    def priority(index: int) -> tuple[float, float, int, float, int]:
+        row = rows[index]
+        rarity = sum(
+            1.0 / (1 + feature_counts[str(feature)])
+            for feature in row.get("features", [])
         )
-        original_index, row = remaining.pop(best_position)
-        selected.append((original_index, row))
-        origin = str(
-            row.get("source_origin")
-            or _source_origin(str(row.get("source_url") or ""))
-            or row.get("source_hash")
-            or "unknown"
+        origin_rarity = 1.0 / (1 + origin_counts[_row_origin(row)])
+        # Min-heap: negate "higher is better" terms; the trailing original
+        # index breaks full ties in favor of the earlier row, matching the
+        # first-occurrence behavior of the original max() scan.
+        return (
+            -rarity,
+            -origin_rarity,
+            0 if row.get("view") == "implementation" else 1,
+            -float(row.get("quality_score") or 0.0),
+            index,
         )
-        origin_counts[origin] += 1
+
+    heap = [(*priority(index), index) for index in range(len(rows))]
+    heapq.heapify(heap)
+    selected: list[tuple[int, dict[str, Any]]] = []
+    while heap and len(selected) < limit:
+        *key, index = heapq.heappop(heap)
+        current = priority(index)
+        if tuple(key) != current:
+            heapq.heappush(heap, (*current, index))
+            continue
+        row = rows[index]
+        origin_counts[_row_origin(row)] += 1
         feature_counts.update(str(feature) for feature in row.get("features", []))
+        selected.append((index, row))
     return [row for _, row in sorted(selected)]
 
 

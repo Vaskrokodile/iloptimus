@@ -203,7 +203,12 @@ def test_vllm_stream_generate_yields_per_token_chunks():
     assert all(c.generation_tokens == i + 1 for i, c in enumerate(chunks))
 
 
-def test_vllm_clear_cache_and_memory_info_are_safe_without_torch():
+def test_vllm_clear_cache_and_memory_info_are_safe_without_torch(monkeypatch):
+    import sys
+
+    # Simulate an environment without torch regardless of the host venv: a
+    # None entry in sys.modules makes ``import torch`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "torch", None)
     backend = get_backend("vllm")
     # Should not raise even though torch is not installed.
     backend.clear_cache(None)

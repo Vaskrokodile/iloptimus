@@ -34,9 +34,10 @@ __all__ = [
 ]
 
 
-# Backward-compat re-export of the MLX tokenization helper (used by tests and
-# the MLX SFT path). It remains MLX-specific because it relies on
-# ``mlx_lm.tuner.datasets.CompletionsDataset`` for offset computation.
+# Backward-compat re-export of the SFT tokenization helper (used by tests and
+# every backend's SFT path). Offset computation is backend-independent: the
+# prompt is rendered alone for the offset and prompt+completion for the full
+# sequence, mirroring ``mlx_lm.tuner.datasets.CompletionsDataset`` semantics.
 def tokenize_sft_rows(
     rows: list[dict[str, str]], tokenizer: Any, *, max_seq_length: int, mask_prompt: bool = True
 ) -> tuple[EagerCompletionDataset, dict[str, Any]]:

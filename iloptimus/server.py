@@ -95,8 +95,10 @@ from .core.learning import (
 )
 from .core.model_store import (
     compatible_precision,
+    download_adapter,
     download_model,
     model_status,
+    resolve_adapter_path,
     resolve_model_source,
 )
 from .core.performance import estimate_context_performance, record_chat_performance
@@ -183,7 +185,7 @@ class CreateRunRequest(BaseModel):
 class ChatRequest(BaseModel):
     model_id: str
     message: str
-    history: list[dict[str, str]] = Field(default_factory=list)
+    history: list[dict[str, Any]] = Field(default_factory=list)
     max_tokens: int = 384
     context_window: int = 4096
     use_tools: bool = True
@@ -273,10 +275,14 @@ async def _load_chat_handle_unlocked(model_info) -> ModelHandle:
     source = resolve_model_source(model_info.id, precision, hw.recommended_backend)
     if not source:
         raise HTTPException(409, "Download this model from Model Library before using it")
+    # If the model is a base + LoRA adapter pair, resolve the adapter path so
+    # the backend loads the adapter on top of the base model.
+    adapter_path = resolve_adapter_path(model_info.id) if model_info.adapter_repo else None
     handle = await _run_in_executor(
         load_model,
         model_info.huggingface_id,
         precision,
+        adapter_path=adapter_path,
         source_override=source,
     )
     _chat_models.clear()
@@ -2564,6 +2570,7 @@ def create_app() -> FastAPI:
                     "backends": m.backends,
                     "description": m.description,
                     "tags": m.tags,
+                    "adapter_repo": m.adapter_repo,
                     "local": model_status(m.id, precision, hw.recommended_backend),
                     "compatibility": {
                         "status": compat.status,
@@ -2598,6 +2605,8 @@ def create_app() -> FastAPI:
             "backends": m.backends,
             "description": m.description,
             "tags": m.tags,
+            "adapter_repo": m.adapter_repo,
+            "adapter_downloaded": resolve_adapter_path(m.id) is not None if m.adapter_repo else None,
             "local": model_status(m.id, precision, hw.recommended_backend),
             "compatibility": {
                 "status": compat.status,
@@ -2859,6 +2868,80 @@ def create_app() -> FastAPI:
             "learning_session": learning_session,
         }
 
+    # --------------------------------------------------------------- datasets
+    # Dataset factory: declarative, resumable dataset jobs backed by the
+    # persistent content-addressed corpus.
+
+    @app.post("/api/datasets/jobs")
+    async def create_dataset_job(payload: dict):
+        from .core.dataset_factory import DatasetJobRunner, DatasetJobSpec
+        from .core.dataset_tools import FACTORY_CURATION, LEGACY_CURATION
+
+        task = str(payload.get("task") or "").strip()
+        artifact_kind = str(payload.get("artifact_kind") or "code").strip()
+        if not task:
+            raise HTTPException(status_code=400, detail="task is required")
+        preset = str(payload.get("preset") or "factory").casefold()
+        curation = LEGACY_CURATION if preset == "legacy" else FACTORY_CURATION
+        spec = DatasetJobSpec(
+            task=task,
+            artifact_kind=artifact_kind,
+            requested_features=[str(f) for f in payload.get("requested_features") or []],
+            sources=list(payload.get("sources") or []),
+            urls=[str(u) for u in payload.get("urls") or []],
+            workspace_id=payload.get("workspace_id") or None,
+            maximum_rows=int(payload.get("maximum_rows") or 20_000),
+            assembled_examples=int(payload.get("assembled_examples") or 40_000),
+            expanded_examples=int(payload.get("expanded_examples") or 60_000),
+            curation=curation,
+        )
+        runner = DatasetJobRunner()
+
+        def _run_job() -> dict:
+            state = runner.create(spec)
+            return runner.run(state.job_id).public()
+
+        return await asyncio.to_thread(_run_job)
+
+    @app.get("/api/datasets/jobs")
+    async def list_dataset_jobs():
+        from .core.dataset_factory import DatasetJobRunner
+
+        runner = DatasetJobRunner()
+        return {"jobs": await asyncio.to_thread(runner.list)}
+
+    @app.get("/api/datasets/jobs/{job_id}")
+    async def get_dataset_job(job_id: str):
+        from .core.dataset_factory import DatasetJobRunner
+
+        runner = DatasetJobRunner()
+        state = await asyncio.to_thread(runner.get, job_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Unknown dataset job")
+        return state.public()
+
+    @app.get("/api/datasets/{workspace_id}/audit")
+    async def dataset_audit(workspace_id: str):
+        from .core.dataset_tools import dataset_workspace, load_filtered_dataset
+
+        root = dataset_workspace(workspace_id)
+        audit_path = root / "dataset-audit.json"
+        if not audit_path.exists():
+            raise HTTPException(status_code=404, detail="No audit for this workspace")
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        manifest_path = root / "curation-manifest.json"
+        coverage = (
+            json.loads(manifest_path.read_text(encoding="utf-8")).get("feature_coverage")
+            if manifest_path.exists()
+            else None
+        )
+        return {
+            "workspace_id": workspace_id,
+            "audit": audit,
+            "feature_coverage": coverage,
+            "rows": len(load_filtered_dataset(workspace_id)),
+        }
+
     @app.get("/api/tasksets")
     async def tasksets():
         return [
@@ -3039,6 +3122,13 @@ def create_app() -> FastAPI:
         if not resolve_model_source(model.id, precision, backend):
             raise HTTPException(409, "Download this model from Model Library before training")
 
+        # If the model is a base + LoRA adapter pair and the user did not
+        # explicitly set adapter_path, auto-populate it so training continues
+        # from the pre-trained adapter (cumulative self-improvement).
+        adapter_path = None
+        if model.adapter_repo:
+            adapter_path = resolve_adapter_path(model.id)
+
         config = RunConfig(
             model_id=req.model_id,
             taskset_id=req.taskset_id,
@@ -3057,6 +3147,7 @@ def create_app() -> FastAPI:
             rollouts_per_example=req.rollouts_per_example,
             max_reasoning_tokens=req.max_reasoning_tokens,
             max_answer_tokens=req.max_answer_tokens,
+            adapter_path=adapter_path,
         )
         state = create_run(config)
 

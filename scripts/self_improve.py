@@ -40,6 +40,7 @@ from iloptimus.core.pipeline import (
     get_run,
     run_pipeline_subprocess,
 )
+from iloptimus.core.models import get_model
 from iloptimus.core.tasksets import get_all_tasksets, get_taskset
 from iloptimus.core.storage import app_home
 
@@ -48,15 +49,15 @@ from iloptimus.core.storage import app_home
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "deepseek-r1-distill-qwen-1.5b"
-DEFAULT_MAX_ROUNDS = 5
-BENCHMARKS = ["humaneval-v1", "gsm8k-v1"]
+DEFAULT_MODEL = "boosted-v1-small"
+DEFAULT_MAX_ROUNDS = 8
+BENCHMARKS = ["humaneval-v1", "user-three-js-scene-generation-798701"]
 
 # Pipeline hyperparameters tuned for the 1.5B model. The backend is resolved
 # from the detected hardware (MLX on Apple Silicon, vLLM on NVIDIA CUDA) inside
 # the pipeline, so we do not hardcode it here.
 PIPELINE_CONFIG = {
-    "precision": "int4",
+    "precision": "fp16",   # fp16 is faster than int4 on 12GB VRAM (no dequant overhead)
     "sft_iters": 50,       # more iters to learn from few examples
     "sft_lr": 2e-4,        # lower LR — 1e-3 caused loss spikes with 6 examples
     "grpo_iters": 15,      # enough for RL to shape behavior
@@ -184,7 +185,7 @@ def _save_best_adapter(run_id: str, taskset_id: str, round_num: int) -> str:
     import shutil
 
     run_adapter = _si_dir() / "adapters" / f"{taskset_id.replace('-', '_')}_round{round_num}"
-    source = Path(f"~/.iloptimus/runs/{run_id}/adapters/sft").expanduser()
+    source = app_home() / "runs" / run_id / "adapters" / "sft"
 
     if not source.exists() or not (source / "adapters.safetensors").exists():
         _log_round(round_num, f"No SFT adapter found at {source}", "warn")
@@ -218,12 +219,27 @@ async def run_benchmark_pipeline(
     adapter before benchmarking and training. This enables cumulative
     self-improvement: each round builds on top of the previous round's adapter.
 
+    If no adapter_path is given but the model has a pre-trained adapter
+    (e.g. boosted-v1-small), that adapter is loaded as the starting point.
+
     Returns a dict with baseline_accuracy, post_sft_accuracy, post_grpo_accuracy,
     run_id, adapter_path, and traces.
     """
     taskset = get_taskset(taskset_id)
     if not taskset:
         raise ValueError(f"Taskset not found: {taskset_id}")
+
+    # If no previous-round adapter is given, check if the model has a
+    # pre-trained adapter (e.g. boosted-v1-small). This ensures round 1
+    # builds on top of the existing trained adapter, not the base model.
+    if not adapter_path:
+        from iloptimus.core.model_store import resolve_adapter_path
+        model = get_model(model_id)
+        if model and model.adapter_repo:
+            existing = resolve_adapter_path(model.id)
+            if existing:
+                adapter_path = existing
+                _log_round(round_num, f"Using model's pre-trained adapter: {existing}")
 
     adapter_note = f" (with previous adapter)" if adapter_path else " (from base model)"
     _log_round(round_num, f"Starting pipeline: {taskset_id} (domain={taskset.domain}){adapter_note}")

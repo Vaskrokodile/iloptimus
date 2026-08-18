@@ -1,0 +1,107 @@
+[{"stream_name":"stdout","time":0.714655515,"data":"============================================================\n"}
+,{"stream_name":"stdout","time":0.714718372,"data":"Installing dependencies...\n"}
+,{"stream_name":"stdout","time":0.714723687,"data":"============================================================\n"}
+,{"stream_name":"stderr","time":5.801083777,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":5.801133714,"data":"    Found GPU0 Tesla P100-PCIE-16GB which is of cuda capability 6.0.\n"}
+,{"stream_name":"stderr","time":5.8011491920000005,"data":"    Minimum and Maximum cuda capability supported by this version of PyTorch is\n"}
+,{"stream_name":"stderr","time":5.801152767,"data":"    (7.0) - (12.0)\n"}
+,{"stream_name":"stderr","time":5.801155845,"data":"    \n"}
+,{"stream_name":"stderr","time":5.801159142,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":5.801162212,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":5.801165392,"data":"    Please install PyTorch with a following CUDA\n"}
+,{"stream_name":"stderr","time":5.80116841,"data":"    configurations:  12.6 following instructions at\n"}
+,{"stream_name":"stderr","time":5.801171312,"data":"    https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":5.8011743209999995,"data":"    \n"}
+,{"stream_name":"stderr","time":5.801177727,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":5.8013236809999995,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":5.801333017,"data":"Tesla P100-PCIE-16GB with CUDA capability sm_60 is not compatible with the current PyTorch installation.\n"}
+,{"stream_name":"stderr","time":5.801337736,"data":"The current PyTorch install supports CUDA capabilities sm_70 sm_75 sm_80 sm_86 sm_90 sm_100 sm_120.\n"}
+,{"stream_name":"stderr","time":5.801342234,"data":"If you want to use the Tesla P100-PCIE-16GB GPU with PyTorch, please check the instructions at https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":5.80134686,"data":"\n"}
+,{"stream_name":"stderr","time":5.801351037,"data":"  queued_call()\n"}
+,{"stream_name":"stdout","time":5.802740713,"data":"Detected GPU: Tesla P100-PCIE-16GB (compute capability 6.0)\n"}
+,{"stream_name":"stdout","time":5.802758407,"data":"GPU compute capability 6.0 \u003c 7.0 — installing compatible PyTorch...\n"}
+,{"stream_name":"stdout","time":17.284010906,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 798.9/798.9 MB 2.1 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":19.926252197,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.1/7.1 MB 114.4 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":20.209255774,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 23.7/23.7 MB 233.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":20.330295928,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 823.6/823.6 kB 233.3 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":20.449747419,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.1/14.1 MB 217.6 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":27.74702433,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 664.8/664.8 MB 2.3 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":32.368366482,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 410.6/410.6 MB 77.3 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":34.813510834,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 121.6/121.6 MB 122.4 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":35.532839526,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.5/56.5 MB 173.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":36.31632334,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 124.2/124.2 MB 163.6 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":37.588875881,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 196.0/196.0 MB 127.5 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":39.062091082,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 176.2/176.2 MB 137.0 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":40.414124871,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 99.1/99.1 kB 121.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":43.115471191,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 209.5/209.5 MB 8.8 MB/s eta 0:00:00\n"}
+,{"stream_name":"stderr","time":140.431934927,"data":"ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\n"}
+,{"stream_name":"stderr","time":140.431976797,"data":"torchaudio 2.10.0+cu128 requires torch==2.10.0, but you have torch 2.4.1+cu121 which is incompatible.\n"}
+,{"stream_name":"stdout","time":141.014019146,"data":"GPU detection failed: Only a single TORCH_LIBRARY can be used to register the namespace triton; please put all of your definitions in a single TORCH_LIBRARY block.  If you were trying to specify implementations, consider using TORCH_LIBRARY_IMPL (which can be duplicated).  If you really intended to define operators for a single namespace in a distributed way, you can use TORCH_LIBRARY_FRAGMENT to explicitly indicate this.  Previous registration of TORCH_LIBRARY was registered at /usr/local/lib/python3.12/dist-packages/torch/__init__.py:2805; latest registration was registered at /usr/local/lib/python3.12/dist-packages/torch/__init__.py:2165\n"}
+,{"stream_name":"stdout","time":141.014059903,"data":"Using SDPA attention (compatible with all GPU types)\n"}
+,{"stream_name":"stdout","time":142.672422527,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 925.8/925.8 kB 18.6 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":145.171483286,"data":"Dependencies installed.\n"}
+,{"stream_name":"stderr","time":161.266586061,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":161.266617266,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/utils/import_utils.py\", line 2098, in __getattr__\n"}
+,{"stream_name":"stderr","time":161.267072623,"data":"    module = self._get_module(self._class_to_module[name])\n"}
+,{"stream_name":"stderr","time":161.26721881,"data":"             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.267244637,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/utils/import_utils.py\", line 2288, in _get_module\n"}
+,{"stream_name":"stderr","time":161.2677822,"data":"    raise e\n"}
+,{"stream_name":"stderr","time":161.267795075,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/utils/import_utils.py\", line 2286, in _get_module\n"}
+,{"stream_name":"stderr","time":161.268281979,"data":"    return importlib.import_module(\".\" + module_name, self.__name__)\n"}
+,{"stream_name":"stderr","time":161.268430439,"data":"           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.268477736,"data":"  File \"/usr/lib/python3.12/importlib/__init__.py\", line 90, in import_module\n"}
+,{"stream_name":"stderr","time":161.26948008,"data":"    return _bootstrap._gcd_import(name[level:], package, level)\n"}
+,{"stream_name":"stderr","time":161.26959451,"data":"           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.269673606,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 1387, in _gcd_import\n"}
+,{"stream_name":"stderr","time":161.269681803,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 1360, in _find_and_load\n"}
+,{"stream_name":"stderr","time":161.269685883,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 1331, in _find_and_load_unlocked\n"}
+,{"stream_name":"stderr","time":161.269689593,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 935, in _load_unlocked\n"}
+,{"stream_name":"stderr","time":161.269693256,"data":"  File \"\u003cfrozen importlib._bootstrap_external\u003e\", line 999, in exec_module\n"}
+,{"stream_name":"stderr","time":161.269697414,"data":"  File \"\u003cfrozen importlib._bootstrap\u003e\", line 488, in _call_with_frames_removed\n"}
+,{"stream_name":"stderr","time":161.269701618,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/models/bloom/modeling_bloom.py\", line 27, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.269887534,"data":"    from ...modeling_layers import GradientCheckpointingLayer\n"}
+,{"stream_name":"stderr","time":161.269899373,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/modeling_layers.py\", line 27, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.270023477,"data":"    from .processing_utils import Unpack\n"}
+,{"stream_name":"stderr","time":161.270036091,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/processing_utils.py\", line 38, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.270133188,"data":"    from .image_utils import ChannelDimension, ImageInput, is_vision_available\n"}
+,{"stream_name":"stderr","time":161.27013995,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/image_utils.py\", line 53, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.270285942,"data":"    from torchvision.transforms import InterpolationMode\n"}
+,{"stream_name":"stderr","time":161.270291908,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torchvision/__init__.py\", line 10, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.270384512,"data":"    from torchvision import _meta_registrations, datasets, io, models, ops, transforms, utils  # usort:skip\n"}
+,{"stream_name":"stderr","time":161.270579416,"data":"    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.270611411,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torchvision/_meta_registrations.py\", line 163, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.270823638,"data":"    @torch.library.register_fake(\"torchvision::nms\")\n"}
+,{"stream_name":"stderr","time":161.27086952,"data":"     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.270907636,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/library.py\", line 1073, in register\n"}
+,{"stream_name":"stderr","time":161.271213146,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/library.py\", line 203, in _register_fake\n"}
+,{"stream_name":"stderr","time":161.271353104,"data":"    op_name: operator name (along with the overload) or OpOverload object.\n"}
+,{"stream_name":"stderr","time":161.271464375,"data":"         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":161.27147063,"data":"  File \"/usr/local/lib/python3.12/dist-packages/torch/_library/fake_impl.py\", line 50, in register\n"}
+,{"stream_name":"stderr","time":161.271791841,"data":"RuntimeError: operator torchvision::nms does not exist\n"}
+,{"stream_name":"stderr","time":161.271828117,"data":"\n"}
+,{"stream_name":"stderr","time":161.271830922,"data":"The above exception was the direct cause of the following exception:\n"}
+,{"stream_name":"stderr","time":161.271833442,"data":"\n"}
+,{"stream_name":"stderr","time":161.271835957,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":161.271838367,"data":"  File \"/kaggle/src/script.py\", line 70, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.271934545,"data":"    from peft import LoraConfig, get_peft_model, PeftModel\n"}
+,{"stream_name":"stderr","time":161.27194652,"data":"  File \"/usr/local/lib/python3.12/dist-packages/peft/__init__.py\", line 17, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.272070365,"data":"    from .auto import (\n"}
+,{"stream_name":"stderr","time":161.272077063,"data":"  File \"/usr/local/lib/python3.12/dist-packages/peft/auto.py\", line 31, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.272147516,"data":"    from .config import PeftConfig\n"}
+,{"stream_name":"stderr","time":161.272171686,"data":"  File \"/usr/local/lib/python3.12/dist-packages/peft/config.py\", line 30, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.272283542,"data":"    from .utils import CONFIG_NAME, PeftType, TaskType\n"}
+,{"stream_name":"stderr","time":161.272289441,"data":"  File \"/usr/local/lib/python3.12/dist-packages/peft/utils/__init__.py\", line 15, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.272364918,"data":"    from .constants import ALLOWED_COMPUTE_DTYPES, UPCAST_DTYPES\n"}
+,{"stream_name":"stderr","time":161.272390852,"data":"  File \"/usr/local/lib/python3.12/dist-packages/peft/utils/constants.py\", line 16, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":161.272486208,"data":"    from transformers import BloomPreTrainedModel\n"}
+,{"stream_name":"stderr","time":161.272503274,"data":"  File \"/usr/local/lib/python3.12/dist-packages/transformers/utils/import_utils.py\", line 2182, in __getattr__\n"}
+,{"stream_name":"stderr","time":161.273023476,"data":"    raise ModuleNotFoundError(\n"}
+,{"stream_name":"stderr","time":161.273036424,"data":"ModuleNotFoundError: Could not import module 'BloomPreTrainedModel'. Are this object's requirements defined correctly?\n"}
+,{"stream_name":"stderr","time":164.87355388,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":164.87358133,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":165.09814974,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":165.098187469,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":165.729516402,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":166.879250387,"data":"[NbConvertApp] Writing 336669 bytes to __results__.html\n"}
+]

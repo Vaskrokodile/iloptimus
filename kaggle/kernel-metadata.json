@@ -1,0 +1,14 @@
+{
+  "id": "krokodileceo/boosted-v1-sft-round1",
+  "title": "boosted-v1-sft-round1",
+  "code_file": "sft_round1.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

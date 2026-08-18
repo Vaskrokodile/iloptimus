@@ -1,0 +1,49 @@
+[{"stream_name":"stdout","time":1.2856824470000001,"data":"============================================================\n"}
+,{"stream_name":"stdout","time":1.285774193,"data":"Installing dependencies...\n"}
+,{"stream_name":"stdout","time":1.28578664,"data":"============================================================\n"}
+,{"stream_name":"stdout","time":6.390849156,"data":"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.5/8.5 MB 75.3 MB/s eta 0:00:00\n"}
+,{"stream_name":"stderr","time":4209.109458163,"data":"  error: subprocess-exited-with-error\n"}
+,{"stream_name":"stderr","time":4209.110153949,"data":"  \n"}
+,{"stream_name":"stderr","time":4209.110169775,"data":"  × python setup.py bdist_wheel did not run successfully.\n"}
+,{"stream_name":"stderr","time":4209.110176466,"data":"  │ exit code: 1\n"}
+,{"stream_name":"stderr","time":4209.110181127,"data":"  ╰─\u003e See above for output.\n"}
+,{"stream_name":"stderr","time":4209.110186099,"data":"  \n"}
+,{"stream_name":"stderr","time":4209.110205007,"data":"  note: This error originates from a subprocess, and is likely not a problem with pip.\n"}
+,{"stream_name":"stderr","time":4209.110455807,"data":"  ERROR: Failed building wheel for flash-attn\n"}
+,{"stream_name":"stderr","time":4221.430183388,"data":"ERROR: ERROR: Failed to build installable wheels for some pyproject.toml based projects (flash-attn)\n"}
+,{"stream_name":"stdout","time":4224.927435701,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 925.8/925.8 kB 23.5 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":4225.269222573,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 41.0/41.0 MB 50.1 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":4228.780856883,"data":"Dependencies installed.\n"}
+,{"stream_name":"stdout","time":4274.573321399,"data":"PyTorch: 2.10.0+cu128\n"}
+,{"stream_name":"stdout","time":4274.573354702,"data":"CUDA available: True\n"}
+,{"stream_name":"stdout","time":4274.59804742,"data":"GPU count: 1\n"}
+,{"stream_name":"stderr","time":4274.601092494,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":4274.601115798,"data":"    Found GPU0 Tesla P100-PCIE-16GB which is of cuda capability 6.0.\n"}
+,{"stream_name":"stderr","time":4274.60112096,"data":"    Minimum and Maximum cuda capability supported by this version of PyTorch is\n"}
+,{"stream_name":"stderr","time":4274.601125676,"data":"    (7.0) - (12.0)\n"}
+,{"stream_name":"stderr","time":4274.601130051,"data":"    \n"}
+,{"stream_name":"stderr","time":4274.60113432,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":4274.601138341,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":4274.601142374,"data":"    Please install PyTorch with a following CUDA\n"}
+,{"stream_name":"stderr","time":4274.601146419,"data":"    configurations:  12.6 following instructions at\n"}
+,{"stream_name":"stderr","time":4274.601150404,"data":"    https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":4274.601154697,"data":"    \n"}
+,{"stream_name":"stderr","time":4274.601158546,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":4274.601512872,"data":"/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:435: UserWarning: \n"}
+,{"stream_name":"stderr","time":4274.601531696,"data":"Tesla P100-PCIE-16GB with CUDA capability sm_60 is not compatible with the current PyTorch installation.\n"}
+,{"stream_name":"stderr","time":4274.601552877,"data":"The current PyTorch install supports CUDA capabilities sm_70 sm_75 sm_80 sm_86 sm_90 sm_100 sm_120.\n"}
+,{"stream_name":"stderr","time":4274.601556579,"data":"If you want to use the Tesla P100-PCIE-16GB GPU with PyTorch, please check the instructions at https://pytorch.org/get-started/locally/\n"}
+,{"stream_name":"stderr","time":4274.601560088,"data":"\n"}
+,{"stream_name":"stderr","time":4274.601563227,"data":"  queued_call()\n"}
+,{"stream_name":"stderr","time":4274.602370827,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":4274.602387677,"data":"  File \"/kaggle/src/script.py\", line 55, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":4274.602562816,"data":"    print(f\"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_mem / 1e9:.1f} GB)\")\n"}
+,{"stream_name":"stderr","time":4274.604029384,"data":"                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":4274.604050101,"data":"AttributeError: 'torch._C._CudaDeviceProperties' object has no attribute 'total_mem'. Did you mean: 'total_memory'?\n"}
+,{"stream_name":"stderr","time":4278.410126374,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":4278.41016526,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":4278.761983008,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":4278.762013419,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":4279.418256851,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":4280.982059877,"data":"[NbConvertApp] Writing 330254 bytes to __results__.html\n"}
+]

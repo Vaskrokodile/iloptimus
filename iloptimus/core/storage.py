@@ -18,6 +18,10 @@ def models_dir() -> Path:
     return app_home() / "models"
 
 
+def adapters_dir() -> Path:
+    return app_home() / "adapters"
+
+
 def environments_dir() -> Path:
     return app_home() / "environments"
 
@@ -32,7 +36,7 @@ def learning_dir() -> Path:
 
 def ensure_app_dirs() -> Path:
     root = app_home()
-    for path in (root, models_dir(), environments_dir(), runs_dir(), learning_dir()):
+    for path in (root, models_dir(), adapters_dir(), environments_dir(), runs_dir(), learning_dir()):
         path.mkdir(parents=True, exist_ok=True)
     return root
 

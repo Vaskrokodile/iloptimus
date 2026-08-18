@@ -68,6 +68,138 @@ def _torch_cuda_available() -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# MLX → PEFT adapter conversion
+#
+# MLX LoRA adapters use a different weight layout and config schema than PEFT:
+#
+#   MLX:   model.layers.{N}.self_attn.{proj}.lora_a  shape [in, rank]
+#          model.layers.{N}.self_attn.{proj}.lora_b  shape [rank, out]
+#          scale applied at runtime:  delta = scale * x @ lora_a @ lora_b
+#
+#   PEFT:  base_model.model.model.layers.{N}.self_attn.{proj}.lora_A.weight  [rank, in]
+#          base_model.model.model.layers.{N}.self_attn.{proj}.lora_B.weight  [out, rank]
+#          scaling = lora_alpha / r:  delta = scaling * x @ A.T @ B.T
+#
+# Equivalence:  scale = lora_alpha / r  →  lora_alpha = scale * r
+# Weight mapping:  lora_A.weight = lora_a.T ,  lora_B.weight = lora_b.T
+# ---------------------------------------------------------------------------
+
+
+def _is_mlx_adapter(path: str) -> bool:
+    """Return True if *path* holds an MLX-format LoRA adapter."""
+    if not os.path.isdir(path):
+        return False
+    has_mlx_weights = os.path.exists(os.path.join(path, "adapters.safetensors"))
+    has_mlx_config = os.path.exists(os.path.join(path, "adapter_config.json"))
+    has_peft_weights = os.path.exists(os.path.join(path, "adapter_model.safetensors"))
+    return has_mlx_weights and has_mlx_config and not has_peft_weights
+
+
+def _convert_mlx_adapter_to_peft(mlx_path: str) -> str:
+    """Convert an MLX LoRA adapter to PEFT format in-place.
+
+    Reads ``adapters.safetensors`` + the MLX ``adapter_config.json``, transposes
+    and renames the weights to PEFT's convention, writes
+    ``adapter_model.safetensors`` and a PEFT-compatible ``adapter_config.json``
+    alongside the originals. Returns *mlx_path* (now containing both formats).
+
+    The conversion is idempotent: if a PEFT ``adapter_model.safetensors``
+    already exists the path is returned unchanged.
+    """
+    peft_weights = os.path.join(mlx_path, "adapter_model.safetensors")
+    if os.path.exists(peft_weights):
+        return mlx_path  # already converted
+
+    import json
+
+    from safetensors.torch import save_file
+
+    # Read MLX config.
+    with open(os.path.join(mlx_path, "adapter_config.json"), "r") as f:
+        mlx_cfg = json.load(f)
+
+    lora_params = mlx_cfg.get("lora_parameters", {})
+    rank = int(lora_params.get("rank", 8))
+    scale = float(lora_params.get("scale", 20.0))
+    dropout = float(lora_params.get("dropout", 0.0))
+    targets = list(lora_params.get("targets", ["self_attn.q_proj", "self_attn.v_proj"]))
+    num_layers = int(mlx_cfg.get("num_layers", 0))
+
+    lora_alpha = int(round(scale * rank))
+
+    # Read + transpose MLX weights into PEFT key naming.
+    from safetensors import safe_open
+
+    peft_state_dict: dict[str, Any] = {}
+    with safe_open(os.path.join(mlx_path, "adapters.safetensors"), framework="pt") as f:
+        for key in f.keys():
+            tensor = f.get_tensor(key)
+            # key: model.layers.{N}.self_attn.{proj}.lora_a  or  .lora_b
+            if key.endswith(".lora_a"):
+                peft_key = key.replace(".lora_a", ".lora_A.weight")
+                # MLX [in, rank] -> PEFT [rank, in]
+                peft_state_dict[peft_key] = tensor.t().contiguous()
+            elif key.endswith(".lora_b"):
+                peft_key = key.replace(".lora_b", ".lora_B.weight")
+                # MLX [rank, out] -> PEFT [out, rank]
+                peft_state_dict[peft_key] = tensor.t().contiguous()
+            else:
+                # Unknown key — pass through unchanged.
+                peft_state_dict[key] = tensor
+
+    # Prefix PEFT keys with the expected base_model.model. namespace.
+    prefixed: dict[str, Any] = {}
+    for k, v in peft_state_dict.items():
+        if not k.startswith("base_model.model."):
+            prefixed[f"base_model.model.{k}"] = v
+        else:
+            prefixed[k] = v
+
+    save_file(prefixed, peft_weights)
+
+    # Determine which layer indices are present in the adapter.
+    layer_indices: list[int] = []
+    for k in prefixed:
+        parts = k.split(".")
+        if "layers" in parts:
+            idx = int(parts[parts.index("layers") + 1])
+            if idx not in layer_indices:
+                layer_indices.append(idx)
+    layer_indices.sort()
+
+    # Write a PEFT-compatible adapter_config.json.
+    # We do NOT set layers_to_transform/layers_pattern: PEFT's layer-restriction
+    # mechanism is fragile across model architectures. Instead we let PEFT
+    # create LoRA for all matching target_modules; layers without loaded weights
+    # keep their default zero-initialized lora_B, contributing zero delta —
+    # mathematically identical to not having LoRA on those layers.
+    peft_cfg = {
+        "auto_mapping": {
+            "base_model_name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        },
+        "peft_type": "LORA",
+        "r": rank,
+        "lora_alpha": lora_alpha,
+        "lora_dropout": dropout,
+        "target_modules": targets,
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+        "fan_in_fan_out": False,
+        "inference_mode": True,
+        "modules_to_save": None,
+    }
+
+    with open(os.path.join(mlx_path, "adapter_config.json"), "w") as f:
+        json.dump(peft_cfg, f, indent=2)
+
+    print(
+        f"Converted MLX adapter to PEFT format: rank={rank}, alpha={lora_alpha}, "
+        f"layers={layer_indices}, targets={targets}"
+    )
+    return mlx_path
+
+
 class VLLMBackend(Backend):
     name = "vllm"
 
@@ -81,6 +213,7 @@ class VLLMBackend(Backend):
         adapter_path: Optional[str] = None,
         cache_dir: Optional[str] = None,
         source_override: Optional[str] = None,
+        merge_adapter: bool = True,
     ) -> ModelHandle:
         """Load a model for the CUDA backend.
 
@@ -92,6 +225,11 @@ class VLLMBackend(Backend):
         """
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        # Enable TF32 tensor cores for float32 matmuls — gives ~20% speedup
+        # on Ampere+ GPUs (RTX 30xx+) with negligible precision loss.
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
 
         source = source_override or huggingface_id
         cache_dir = cache_dir or os.path.expanduser("~/.cache/iloptimus/models")
@@ -126,8 +264,11 @@ class VLLMBackend(Backend):
         t0 = time.time()
         load_kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
-            "device_map": "auto" if torch.cuda.is_available() else None,
+            "attn_implementation": "sdpa",  # Flash/mem-efficient SDPA kernels
+            "low_cpu_mem_usage": True,
         }
+        if torch.cuda.is_available():
+            load_kwargs["device_map"] = {"": "cuda"}  # pin everything to GPU
         if quantization_config is not None:
             load_kwargs["quantization_config"] = quantization_config
         model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs)
@@ -136,14 +277,74 @@ class VLLMBackend(Backend):
             tokenizer.pad_token = tokenizer.eos_token
         print(f"HF model loaded in {time.time() - t0:.1f}s")
 
+        # Enable eval mode for faster generation
+        model.eval()
+
         # Apply a pre-trained LoRA adapter if provided (cumulative training).
+        # MLX-format adapters are transparently converted to PEFT format so
+        # adapters trained on Apple Silicon load on NVIDIA CUDA.
         peft_model = None
         if adapter_path and os.path.exists(adapter_path):
             from peft import PeftModel
 
+            if _is_mlx_adapter(adapter_path):
+                adapter_path = _convert_mlx_adapter_to_peft(adapter_path)
             model = PeftModel.from_pretrained(model, adapter_path)
             peft_model = model
             print(f"Loaded LoRA adapter from {adapter_path}")
+
+            # Merge LoRA weights into the base model for zero-overhead
+            # inference. This eliminates the extra LoRA matmul on every
+            # forward pass. The merged model is a plain transformers model
+            # (not PEFT), so it can't be further trained — but for inference
+            # it's strictly faster.
+            #
+            # When merge_adapter=False (training mode), we keep the PeftModel
+            # unmerged. This allows SFT to train the existing LoRA layers
+            # further (cumulative self-improvement) instead of creating new
+            # ones. Merging before training would break adapter stacking
+            # because the saved LoRA delta would be relative to the merged
+            # weights, not the base model.
+            if merge_adapter:
+                try:
+                    model = model.merge_and_unload()
+                    print("LoRA adapter merged into base model (zero-overhead inference)")
+                except Exception as error:
+                    print(f"LoRA merge skipped: {error}")
+            else:
+                print("LoRA adapter kept as PEFT wrapper (training mode — no merge)")
+
+        # torch.compile: JIT-compile the forward pass for faster generation.
+        # We compile only `model.forward` (not the whole model) so that
+        # `model.generate()` still works — torch.compile on the whole module
+        # returns a function wrapper that lacks the .generate() method.
+        # mode="default" uses inductor optimizations without CUDA graphs
+        # (CUDA graphs conflict with Qwen2's rotary position embeddings).
+        # This gives ~3-5x speedup on small models where per-token CPU
+        # overhead dominates. Requires triton.
+        #
+        # Skip torch.compile in training mode (merge_adapter=False) because
+        # it interferes with gradient computation and PEFT training.
+        if merge_adapter:
+            try:
+                model.forward = torch.compile(model.forward, mode="default")
+                print("torch.compile enabled (forward, mode=default)")
+
+                # Pre-compile: run a dummy 1-token forward pass to trigger
+                # inductor compilation now (during model loading) rather than
+                # on the user's first message. The compiled graph is cached
+                # on disk (TORCHINDUCTOR_CACHE_DIR) so subsequent loads are fast.
+                if torch.cuda.is_available():
+                    print("Pre-compiling forward pass (may take 30-60s on first run)...")
+                    t_compile = time.time()
+                    dummy_ids = tokenizer("hi", return_tensors="pt").to("cuda")
+                    with torch.inference_mode():
+                        _ = model(**dummy_ids)
+                    print(f"Forward pass compiled in {time.time() - t_compile:.1f}s")
+            except Exception as error:
+                print(f"torch.compile unavailable: {error}")
+        else:
+            print("torch.compile skipped (training mode)")
 
         # Optional vLLM engine for fast inference. Created from the base source;
         # trained adapters are attached on the fly via LoRARequest.
@@ -277,6 +478,7 @@ class VLLMBackend(Backend):
             "max_new_tokens": max_tokens,
             "do_sample": temperature > 0,
             "use_cache": True,
+            "pad_token_id": tokenizer.pad_token_id,
         }
         if temperature > 0:
             gen_kwargs["temperature"] = temperature
@@ -286,11 +488,18 @@ class VLLMBackend(Backend):
         if stop_token_ids:
             gen_kwargs["eos_token_id"] = stop_token_ids
 
-        with torch.no_grad():
+        # inference_mode is faster than no_grad — disables version counting
+        # and autograd dispatch, reducing per-token CPU overhead.
+        with torch.inference_mode():
             out = model.generate(**inputs, **gen_kwargs, return_dict_in_generate=True, output_scores=return_logprobs)
         new_tokens = out.sequences[0][inputs["input_ids"].shape[1]:]
         token_ids = new_tokens.tolist()
         text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        # Determine finish_reason: if we generated exactly max_new_tokens
+        # without hitting EOS, the budget was exhausted (length); otherwise
+        # the model stopped naturally (stop). This is critical for the
+        # two-stage reasoning/answer split in run_inference.
+        finish_reason = "length" if len(token_ids) >= max_tokens else "stop"
         logprobs: list[float] = []
         if return_logprobs and getattr(out, "scores", None):
             import torch.nn.functional as F
@@ -305,7 +514,7 @@ class VLLMBackend(Backend):
             for s in stop_strings:
                 if s in text:
                     text = text.split(s)[0]
-        return GenerateResult(text=text, token_ids=token_ids, logprobs=logprobs)
+        return GenerateResult(text=text, token_ids=token_ids, logprobs=logprobs, finish_reason=finish_reason)
 
     # ------------------------------------------------------------- generate
 
@@ -435,10 +644,13 @@ class VLLMBackend(Backend):
             reasoning = reasoning.strip()
             answer = answer.strip()
         else:
-            # Reasoning consumed the budget without think-close — force an answer.
+            # No think-close tag was emitted. The text so far is reasoning —
+            # close the think phase and let the model generate the actual
+            # answer. We do NOT inject a "The answer is" prefix (that caused
+            # the model to complete the sentence with a random number).
             reasoning = raw.strip()
             forced = True
-            forced_prompt = chat_text + raw + THINK_CLOSE + "\n<answer>The answer is "
+            forced_prompt = chat_text + raw + THINK_CLOSE + "\n"
             ans = self.generate(
                 handle,
                 forced_prompt,
@@ -452,11 +664,15 @@ class VLLMBackend(Backend):
             answer = ans.text.replace(EOS, "").strip()
 
         full_text = reasoning + THINK_CLOSE + "\n" + answer if reasoning else answer
-        if forced:
-            full_text = reasoning + THINK_CLOSE + "\n<answer>The answer is " + answer + "</answer>"
         elapsed = time.time() - t0
-        tokens_generated = max(1, len(result.token_ids)) if result.token_ids else len(full_text) // 4
-        tps = tokens_generated / elapsed if elapsed > 0 else 0.0
+        # Count actual generated tokens across all passes for accurate TPS.
+        total_tokens = len(result.token_ids) if result.token_ids else 0
+        if forced and ans and ans.token_ids:
+            total_tokens += len(ans.token_ids)
+        tokens_generated = max(1, total_tokens) if total_tokens > 0 else len(full_text) // 4
+        # Floor the elapsed time so a generation that was too fast to measure
+        # still reports a positive throughput instead of a misleading 0.0.
+        tps = tokens_generated / max(elapsed, 1e-3)
         return InferenceResult(
             text=full_text,
             reasoning=reasoning,
@@ -517,6 +733,8 @@ class VLLMBackend(Backend):
             try:
                 from peft import PeftModel
 
+                if _is_mlx_adapter(adapter_path):
+                    adapter_path = _convert_mlx_adapter_to_peft(adapter_path)
                 base = handle.backend_obj["hf_model"]
                 # If already a PeftModel, swap adapter; otherwise wrap.
                 if isinstance(base, PeftModel):

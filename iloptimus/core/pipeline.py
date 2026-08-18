@@ -408,6 +408,7 @@ async def _load_model_stage(run_id: str, config: RunConfig, model: ModelInfo) ->
         source_override=source,
         adapter_path=config.adapter_path,
         backend=config.backend,
+        merge_adapter=False,  # Keep LoRA unmerged for cumulative training
     )
 
     _emit(
