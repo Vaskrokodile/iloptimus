@@ -28,6 +28,7 @@ from typing import AsyncGenerator, Optional
 
 from .hardware import HardwareInfo
 from .models import ModelInfo, get_model
+from .run_manifest import build_run_manifest
 from .storage import atomic_write_json, run_dir, runs_dir
 from .tasksets import get_taskset
 
@@ -116,6 +117,7 @@ class LogEvent:
 class RunState:
     id: str
     config: RunConfig
+    manifest: dict = field(default_factory=dict)
     status: str = "pending"
     stage: str = "initializing"
     progress: float = 0.0
@@ -158,6 +160,7 @@ class RunState:
             "post_sft_traces": self.post_sft_traces,
             "post_grpo_traces": self.post_grpo_traces,
             "config": asdict(self.config),
+            "manifest": self.manifest,
             "artifact_dir": str(run_dir(self.id)),
         }
 
@@ -199,14 +202,21 @@ def _persist_state(state: RunState) -> None:
     atomic_write_json(run_dir(state.id) / "run.json", state.to_dict())
 
 
-def create_run(config: RunConfig) -> RunState:
+def create_run(config: RunConfig, manifest: dict | None = None) -> RunState:
     run_id = uuid.uuid4().hex[:12]
-    state = RunState(id=run_id, config=config, started_at=time.time())
+    resolved_manifest = manifest or build_run_manifest(config)
+    state = RunState(
+        id=run_id,
+        config=config,
+        manifest=resolved_manifest,
+        started_at=time.time(),
+    )
     _runs[run_id] = state
     _event_queues[run_id] = asyncio.Queue()
     folder = run_dir(run_id)
     folder.mkdir(parents=True, exist_ok=False)
     atomic_write_json(folder / "config.json", asdict(config))
+    atomic_write_json(folder / "manifest.json", resolved_manifest)
     _persist_state(state)
     return state
 

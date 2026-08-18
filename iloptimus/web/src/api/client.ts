@@ -236,6 +236,17 @@ export interface RunPreflight {
   checks: RunPreflightCheck[];
 }
 
+export interface RunManifest {
+  schema_version: number;
+  created_at: string;
+  git: { revision: string; dirty: boolean | null };
+  runtime: { python: string; platform: string; machine: string; packages: Record<string, string | null> };
+  config: Record<string, unknown>;
+  hardware: Record<string, unknown> | null;
+  model: Record<string, unknown> | null;
+  taskset: Record<string, unknown> | null;
+}
+
 export interface RunState {
   id: string;
   status: string;
@@ -243,6 +254,7 @@ export interface RunState {
   progress: number;
   started_at: number;
   elapsed_seconds: number;
+  manifest: RunManifest;
   metrics: Record<string, number>;
   baseline_accuracy: number;
   post_sft_accuracy: number;

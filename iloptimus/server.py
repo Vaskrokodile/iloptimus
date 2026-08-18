@@ -104,6 +104,7 @@ from .core.model_store import (
 from .core.performance import estimate_context_performance, record_chat_performance
 from .core.pipeline import _run_in_executor
 from .core.preflight import evaluate_run_preflight
+from .core.run_manifest import build_run_manifest
 from .core.rsi_panels import RsiPanelManager
 from .core.scene_spec import (
     audit_scene_authorship,
@@ -3166,7 +3167,15 @@ def create_app() -> FastAPI:
             max_answer_tokens=req.max_answer_tokens,
             adapter_path=adapter_path,
         )
-        state = create_run(config)
+        state = create_run(
+            config,
+            manifest=build_run_manifest(
+                config,
+                hardware=hw,
+                model=model,
+                taskset=taskset,
+            ),
+        )
 
         # Launch pipeline in background
         asyncio.create_task(run_training_exclusive(state.id))
