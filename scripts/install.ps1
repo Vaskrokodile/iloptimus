@@ -1,5 +1,5 @@
 # IL Optimus — Windows install script
-# Requires: Python 3.11+, NVIDIA CUDA GPU, git
+# Requires: Python 3.11+, NVIDIA CUDA GPU, git, Node.js (for web UI)
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
@@ -38,12 +38,11 @@ if (-not $uv) {
     Write-Host ""
     Write-Host "  Installing uv (fast Python package manager)..." -ForegroundColor Cyan
     & $python -m pip install uv --quiet
-    $uv = "uv"
 } else {
     Write-Host "  uv: already installed" -ForegroundColor Green
 }
 
-# ---- Clone and install IL Optimus ----
+# ---- Clone repo ----
 $installDir = "iloptimus"
 if (-not (Test-Path $installDir)) {
     Write-Host ""
@@ -52,10 +51,37 @@ if (-not (Test-Path $installDir)) {
 }
 Set-Location $installDir
 
+# ---- Create venv ----
+$venvDir = ".venv"
+if (-not (Test-Path $venvDir)) {
+    Write-Host ""
+    Write-Host "  Creating Python virtual environment..." -ForegroundColor Cyan
+    uv venv $venvDir
+}
+
+# ---- Redirect temp/cache to avoid C: drive space issues ----
+# torch CUDA wheels are ~2.5 GB. If C: is space-constrained, uv's cache
+# and temp dir can fill it up. Redirect to the venv's drive if needed.
+$venvDrive = (Split-Path $venvDir -Qualifier)
+$sysTemp = $env:TEMP
+if ($sysTemp) {
+    $sysDrive = (Split-Path $sysTemp -Qualifier)
+    if ($venvDrive -ne $sysDrive) {
+        $altTemp = "$venvDrive\tmp"
+        New-Item -ItemType Directory -Path $altTemp -Force | Out-Null
+        $env:TEMP = $altTemp
+        $env:TMP = $altTemp
+        Write-Host "  Redirected temp to $altTemp (C: drive space conservation)" -ForegroundColor DarkGray
+    }
+}
+$uvCache = "$venvDrive\uv_cache"
+New-Item -ItemType Directory -Path $uvCache -Force | Out-Null
+
+# ---- Install Python dependencies with CUDA torch ----
 Write-Host ""
-Write-Host "  Installing Python dependencies..." -ForegroundColor Cyan
-Write-Host "  (This downloads torch + transformers + peft — may take a few minutes)" -ForegroundColor DarkGray
-& $uv pip install -e ".[cuda]" --quiet 2>&1 | Out-Null
+Write-Host "  Installing Python dependencies (CUDA torch + transformers + peft)..." -ForegroundColor Cyan
+Write-Host "  (This downloads ~2.5 GB of CUDA wheels — may take a few minutes)" -ForegroundColor DarkGray
+uv pip install -e ".[cuda]" --python "$venvDir\Scripts\python.exe" --cache-dir $uvCache
 
 # ---- Build the web frontend ----
 Write-Host ""
@@ -78,7 +104,7 @@ Write-Host "  ============================================" -ForegroundColor Cya
 Write-Host ""
 Write-Host "  Quick start:" -ForegroundColor White
 Write-Host "    cd $installDir" -ForegroundColor White
-Write-Host "    iloptimus serve" -ForegroundColor White
+Write-Host "    .venv\Scripts\iloptimus serve" -ForegroundColor White
 Write-Host ""
 Write-Host "  Then open http://127.0.0.1:7860 in your browser." -ForegroundColor White
 Write-Host ""
@@ -91,5 +117,5 @@ $start = Read-Host "  Start IL Optimus now? (y/N)"
 if ($start -match "^[yY]") {
     Write-Host ""
     Write-Host "  Starting server..." -ForegroundColor Cyan
-    iloptimus serve
+    & "$venvDir\Scripts\iloptimus.exe" serve
 }

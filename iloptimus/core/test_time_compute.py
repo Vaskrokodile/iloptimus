@@ -605,8 +605,10 @@ def _chrome_binary() -> str | None:
         shutil.which("google-chrome"),
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
+        shutil.which("chrome"),  # Windows: may be on PATH if installed
+        shutil.which("msedge"),  # Windows Edge: may be on PATH
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        # Windows paths
+        # Windows Chrome paths
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         # Windows Edge (Chromium-based)

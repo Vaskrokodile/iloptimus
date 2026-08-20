@@ -44,10 +44,21 @@ Or install manually:
 git clone https://github.com/Vaskrokodile/iloptimus.git
 cd iloptimus
 pip install uv
-uv pip install -e ".[cuda]"        # torch, transformers, peft, accelerate, bitsandbytes
+uv venv .venv
+# torch is installed from the PyTorch CUDA index (configured in pyproject.toml)
+# so CUDA wheels are used instead of CPU-only PyPI wheels.
+uv pip install -e ".[cuda]" --python .venv\Scripts\python.exe
 npm install && npm run build       # build the web frontend
-iloptimus serve                    # start the server at http://127.0.0.1:7860
+.venv\Scripts\iloptimus serve      # start the server at http://127.0.0.1:7860
 ```
+
+> **C: drive space:** The CUDA torch wheel is ~2.5 GB. If your C: drive is
+> space-constrained, set `TEMP` and `UV_CACHE_DIR` to a larger drive before
+> installing:
+> ```powershell
+> $env:TEMP = "E:\tmp"; $env:TMP = "E:\tmp"
+> uv pip install -e ".[cuda]" --python .venv\Scripts\python.exe --cache-dir E:\uv_cache
+> ```
 
 > **Note on vLLM:** vLLM is Linux-only and does not build on Windows. On
 > Windows/CUDA, IL Optimus uses HuggingFace Transformers `model.generate` for

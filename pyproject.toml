@@ -16,6 +16,8 @@ dependencies = [
     # vLLM itself is an optional extra (linux only) because it does not build
     # on Windows; the vllm backend lazily imports it and falls back to HF
     # model.generate when it is absent.
+    # NOTE: torch is installed from the PyTorch CUDA index (see [tool.uv] below)
+    # so that CUDA wheels are used instead of the CPU-only PyPI wheels.
     "torch>=2.3.0; sys_platform == 'linux' or sys_platform == 'win32'",
     "transformers>=4.45.0; sys_platform == 'linux' or sys_platform == 'win32'",
     "peft>=0.11.0; sys_platform == 'linux' or sys_platform == 'win32'",
@@ -41,6 +43,18 @@ dev = ["pytest>=8.0.0", "ruff>=0.12.0"]
 
 [project.scripts]
 iloptimus = "iloptimus.cli:main"
+
+# PyTorch CUDA wheels are not on PyPI. uv needs the PyTorch index to resolve
+# CUDA-enabled torch on Linux and Windows. On macOS (Apple Silicon), torch
+# is not installed (MLX is used instead), so the index is harmless.
+[tool.uv]
+find-links = ["https://download.pytorch.org/whl/cu124"]
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
