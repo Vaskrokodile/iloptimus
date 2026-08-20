@@ -262,6 +262,19 @@ def mark_skill_use(skill_ids: Iterable[str], *, successful: bool) -> None:
         atomic_write_json(path, payload)
 
 
+def delete_failure_skill(skill_id: str) -> bool:
+    """Delete a failure skill and all its artifacts. Returns True if deleted."""
+    import shutil
+    folder = _root() / str(skill_id)
+    if not folder.exists() or not folder.is_dir():
+        return False
+    # Safety: only delete inside the skill-memory root
+    if _root() not in folder.parents and folder != _root():
+        return False
+    shutil.rmtree(folder)
+    return True
+
+
 def skill_guardrails(skills: Iterable[dict[str, Any]], *, maximum_chars: int = 3_000) -> str:
     """Render only compact actionable gates into a local model prompt."""
     sections: list[str] = []

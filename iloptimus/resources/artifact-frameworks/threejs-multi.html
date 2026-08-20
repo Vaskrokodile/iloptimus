@@ -177,64 +177,301 @@
       world.add(terrain);
     }
 
-    // === CITY GRID (NYC) ===
-    function createCityGrid() {
-      const groundGeometry = new THREE.PlaneGeometry(80, 80);
-      const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: .92 });
-      const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-      ground.rotation.x = -Math.PI / 2;
-      ground.position.y = 0;
-      ground.receiveShadow = true;
+    // === CITY GRID (NYC) — detailed voxel city ===
+    // Street spacing (Manhattan-style grid). Buildings sit in the blocks
+    // between streets. Cars travel along the street lanes.
+    const CITY_BLOCK = 10;
+    const CITY_EXTENT = 36;
+
+    function createCitySky(skyType) {
+      // Gradient sky dome — dawn/dusk/night NYC vibe. Uses a vertical
+      // gradient shader on a large inverted sphere so the sky reads as
+      // atmosphere rather than a flat color.
+      const skyGeo = new THREE.SphereGeometry(140, 32, 16);
+      const palette = {
+        dawn:  { top: new THREE.Color(0x1a2348), mid: new THREE.Color(0x6b4a8c), bot: new THREE.Color(0xff9e6b) },
+        dusk:  { top: new THREE.Color(0x0d1b3e), mid: new THREE.Color(0x3a2a5e), bot: new THREE.Color(0xff6b4a) },
+        night: { top: new THREE.Color(0x05070f), mid: new THREE.Color(0x0a1228), bot: new THREE.Color(0x141a30) },
+      }[skyType] || {
+        top: new THREE.Color(sceneSpec.sky || 0x1a1a2e),
+        mid: new THREE.Color(sceneSpec.fog || 0x16213e),
+        bot: new THREE.Color(sceneSpec.waterShallow || 0x16537e),
+      };
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide, depthWrite: false,
+        uniforms: { uTop: { value: palette.top }, uMid: { value: palette.mid }, uBot: { value: palette.bot } },
+        vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+        fragmentShader: `uniform vec3 uTop; uniform vec3 uMid; uniform vec3 uBot; varying vec3 vPos;
+          void main(){ float h = normalize(vPos).y; vec3 c = mix(uBot, uMid, smoothstep(-0.05, 0.35, h));
+          c = mix(c, uTop, smoothstep(0.3, 0.85, h)); gl_FragColor = vec4(c, 1.0); }`,
+      });
+      const sky = new THREE.Mesh(skyGeo, skyMat);
+      scene.add(sky);
+      // Override the flat background/fog with sky-appropriate values.
+      scene.background = palette.mid.clone();
+      scene.fog = new THREE.FogExp2(palette.bot.getHex(), 0.012);
+    }
+
+    function createStreetGrid() {
+      // Asphalt ground
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(CITY_EXTENT * 2.4, CITY_EXTENT * 2.4),
+        new THREE.MeshStandardMaterial({ color: 0x232328, roughness: .94 })
+      );
+      ground.rotation.x = -Math.PI / 2; ground.position.y = 0; ground.receiveShadow = true;
       world.add(ground);
-
-      // Street grid lines
-      const streetMaterial = new THREE.MeshStandardMaterial({ color: 0x3a3a3e, roughness: .88 });
-      for (let i = -30; i <= 30; i += 8) {
-        const hStreet = new THREE.Mesh(new THREE.PlaneGeometry(80, 1.2), streetMaterial);
-        hStreet.rotation.x = -Math.PI / 2;
-        hStreet.position.set(0, 0.02, i);
+      // Streets (slightly lighter asphalt) + lane markings
+      const streetMat = new THREE.MeshStandardMaterial({ color: 0x2e2e34, roughness: .9 });
+      const laneMat = new THREE.MeshStandardMaterial({ color: 0xf2c14e, emissive: 0x3a2a00, emissiveIntensity: .15, roughness: .6 });
+      for (let i = -CITY_EXTENT; i <= CITY_EXTENT; i += CITY_BLOCK) {
+        const hStreet = new THREE.Mesh(new THREE.PlaneGeometry(CITY_EXTENT * 2.4, 3.2), streetMat);
+        hStreet.rotation.x = -Math.PI / 2; hStreet.position.set(0, 0.02, i); hStreet.receiveShadow = true;
         world.add(hStreet);
-        const vStreet = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 80), streetMaterial);
-        vStreet.rotation.x = -Math.PI / 2;
-        vStreet.position.set(i, 0.02, 0);
+        const vStreet = new THREE.Mesh(new THREE.PlaneGeometry(3.2, CITY_EXTENT * 2.4), streetMat);
+        vStreet.rotation.x = -Math.PI / 2; vStreet.position.set(i, 0.02, 0); vStreet.receiveShadow = true;
         world.add(vStreet);
+        // Dashed center lane markings
+        for (let m = -CITY_EXTENT; m <= CITY_EXTENT; m += 4) {
+          const hLane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.12), laneMat);
+          hLane.rotation.x = -Math.PI / 2; hLane.position.set(m, 0.05, i); world.add(hLane);
+          const vLane = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 1.4), laneMat);
+          vLane.rotation.x = -Math.PI / 2; vLane.position.set(i, 0.05, m); world.add(vLane);
+        }
       }
+    }
 
-      // Buildings from sceneSpec.buildings
-      const buildings = sceneSpec.buildings || [];
-      const buildingMaterial = new THREE.MeshStandardMaterial({ roughness: .42, metalness: .28, vertexColors: false });
-      buildings.forEach((b) => {
-        const w = Math.max(1, b.width || 3);
-        const d = Math.max(1, b.depth || 3);
-        const h = Math.max(2, b.height || 10);
-        const bx = b.x || 0;
-        const bz = b.z || 0;
-        const hue = b.hue !== undefined ? b.hue : 0.55;
-        const sat = b.saturation !== undefined ? b.saturation : 0.08;
-        const light = b.lightness !== undefined ? b.lightness : 0.18;
-        const mat = new THREE.MeshStandardMaterial({
-          color: new THREE.Color().setHSL(hue, sat, light),
-          roughness: .42, metalness: .28
-        });
-        const building = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-        building.position.set(bx, h / 2, bz);
-        building.castShadow = true;
-        building.receiveShadow = true;
-        world.add(building);
-
-        // Window lights (emissive dots on the front face)
-        if (h > 6) {
-          const winMat = new THREE.MeshStandardMaterial({
-            color: 0xffe08a, emissive: 0xffd060, emissiveIntensity: 1.2
-          });
-          const winGeo = new THREE.BoxGeometry(w * 0.7, 0.3, 0.05);
-          for (let wy = 2; wy < h - 1; wy += 2.5) {
-            const winRow = new THREE.Mesh(winGeo, winMat);
-            winRow.position.set(bx, wy, bz + d / 2 + 0.03);
-            world.add(winRow);
+    function createStreetLights() {
+      // Lamp posts at street intersections with emissive heads.
+      const poleMat = new THREE.MeshStandardMaterial({ color: 0x2a2a30, roughness: .7, metalness: .5 });
+      const lampMat = new THREE.MeshStandardMaterial({ color: 0xfff4d0, emissive: 0xffd060, emissiveIntensity: 2.2 });
+      const poleGeo = new THREE.CylinderGeometry(0.12, 0.16, 5.2, 6);
+      const lampGeo = new THREE.SphereGeometry(0.32, 8, 6);
+      const lightPool = [];
+      for (let i = -CITY_EXTENT; i <= CITY_EXTENT; i += CITY_BLOCK) {
+        for (let j = -CITY_EXTENT; j <= CITY_EXTENT; j += CITY_BLOCK) {
+          if (Math.abs(i) > CITY_EXTENT - 1 || Math.abs(j) > CITY_EXTENT - 1) continue;
+          for (const [ox, oz] of [[1.8, 1.8], [-1.8, -1.8]]) {
+            const pole = new THREE.Mesh(poleGeo, poleMat);
+            pole.position.set(i + ox, 2.6, j + oz); pole.castShadow = true; world.add(pole);
+            const lamp = new THREE.Mesh(lampGeo, lampMat);
+            lamp.position.set(i + ox, 5.3, j + oz); world.add(lamp);
+            lightPool.push([i + ox, 5.3, j + oz]);
           }
         }
+      }
+      // Limited point lights (cap at ~12 for perf) — pick a spread sample.
+      const step = Math.max(1, Math.floor(lightPool.length / 12));
+      for (let k = 0; k < lightPool.length; k += step) {
+        const [lx, ly, lz] = lightPool[k];
+        const pl = new THREE.PointLight(0xffd080, 6, 14, 2);
+        pl.position.set(lx, ly, lz); scene.add(pl);
+      }
+    }
+
+    // Build a single voxel building: a stack of floor-rings made of cube
+    // voxels, with emissive window voxels interspersed on all four faces.
+    // type: 'box' | 'setback' | 'spire'.  All geometry is instanced.
+    function createVoxelBuilding(b, wallInst, winInst, wallCount, winCount) {
+      const w = Math.max(2, Math.round(b.width || b.w || 4));
+      const d = Math.max(2, Math.round(b.depth || b.d || 4));
+      const h = Math.max(3, Math.round(b.height || b.h || 10));
+      const bx = b.x || 0, bz = b.z || 0;
+      const hue = b.hue !== undefined ? b.hue : 0.58;
+      const sat = b.saturation !== undefined ? b.saturation : 0.10;
+      const light = b.lightness !== undefined ? b.lightness : 0.22;
+      const type = b.type || (h > 16 ? 'setback' : 'box');
+      const winDensity = b.windows !== undefined ? Math.max(0, Math.min(1, b.windows)) : 0.55;
+      const wallColor = new THREE.Color().setHSL(hue, sat, light);
+      const wallColorDim = new THREE.Color().setHSL(hue, sat * 0.8, light * 0.7);
+      const winColor = new THREE.Color(0xffe08a);
+      const winColorOff = new THREE.Color(0x1a1a22);
+      let wi = wallCount[0], ii = winCount[0];
+      // Perimeter voxel positions for one floor at given half-width/depth
+      function floorRing(hw, hd, y) {
+        const cells = [];
+        for (let x = -hw; x <= hw; x++) { cells.push([x, y, -hd]); cells.push([x, y, hd]); }
+        for (let z = -hd + 1; z <= hd - 1; z++) { cells.push([-hw, y, z]); cells.push([hw, y, z]); }
+        return cells;
+      }
+      const lit = new Set();
+      for (let y = 0; y < h; y++) {
+        // Setback: shrink footprint above 60% height
+        let hw = Math.floor(w / 2), hd = Math.floor(d / 2);
+        if (type === 'setback' && y > h * 0.6) { hw = Math.max(1, hw - 1); hd = Math.max(1, hd - 1); }
+        const ring = floorRing(hw, hd, y);
+        ring.forEach(([vx, vy, vz], idx) => {
+          dummy.position.set(bx + vx, vy + 0.5, bz + vz);
+          dummy.scale.setScalar(0.96);
+          dummy.updateMatrix();
+          wallInst.setMatrixAt(wi, dummy.matrix);
+          // Corner voxels are darker; top-of-building voxels are lighter
+          const isCorner = (Math.abs(vx) === hw && Math.abs(vz) === hd);
+          wallInst.setColorAt(wi, isCorner ? wallColorDim : wallColor);
+          wi++;
+          // Windows: every other perimeter cell on the faces (not corners),
+          // lit randomly based on winDensity. Place a window voxel slightly
+          // outside the wall so it reads as a glowing window.
+          const isFace = !isCorner;
+          if (isFace && y > 0 && y < h - 1 && idx % 2 === 0) {
+            const litKey = `${vx},${vy},${vz}`;
+            const isLit = winDensity > 0 && (winDensity >= 0.95 || Math.random() < winDensity);
+            const ox = vx === 0 ? 0 : Math.sign(vx) * 0.08;
+            const oz = vz === 0 ? 0 : Math.sign(vz) * 0.08;
+            dummy.position.set(bx + vx + ox, vy + 0.5, bz + vz + oz);
+            dummy.scale.setScalar(0.5);
+            dummy.updateMatrix();
+            winInst.setMatrixAt(ii, dummy.matrix);
+            winInst.setColorAt(ii, isLit ? winColor : winColorOff);
+            ii++;
+          }
+        });
+      }
+      wallCount[0] = wi; winCount[0] = ii;
+      // Rooftop details: water tank on shorter buildings, antenna on tall ones
+      if (h >= 8 && h < 18 && type !== 'spire') {
+        const tank = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.6, 0.7, 1.4, 6),
+          new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: .9 })
+        );
+        tank.position.set(bx + (w > 4 ? 1 : 0), h + 0.7, bz); tank.castShadow = true; world.add(tank);
+      }
+      if (h >= 16 || type === 'spire') {
+        const antenna = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.12, 4, 5),
+          new THREE.MeshStandardMaterial({ color: 0x9a9aa0, roughness: .5, metalness: .6 })
+        );
+        antenna.position.set(bx, h + 2, bz); world.add(antenna);
+        const tip = new THREE.Mesh(
+          new THREE.SphereGeometry(0.12, 6, 5),
+          new THREE.MeshStandardMaterial({ color: 0xff4040, emissive: 0xff2020, emissiveIntensity: 2 })
+        );
+        tip.position.set(bx, h + 4, bz); world.add(tip);
+      }
+    }
+
+    function createParks() {
+      // Green voxel plots in a few empty blocks between buildings.
+      const grassMat = new THREE.MeshStandardMaterial({ color: 0x2d5a2d, roughness: .9 });
+      const treeMat = new THREE.MeshStandardMaterial({ color: 0x3a6b3a, roughness: .85 });
+      const parkSpots = [[-15, -15], [15, 15], [-15, 15], [15, -15]];
+      parkSpots.forEach(([px, pz]) => {
+        const plot = new THREE.Mesh(new THREE.BoxGeometry(5, 0.3, 5), grassMat);
+        plot.position.set(px, 0.15, pz); plot.receiveShadow = true; world.add(plot);
+        for (let t = 0; t < 3; t++) {
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 1.2, 5),
+            new THREE.MeshStandardMaterial({ color: 0x4a3a2a, roughness: .9 }));
+          trunk.position.set(px + (t - 1) * 1.4, 0.9, pz + (t % 2) * 0.8); trunk.castShadow = true; world.add(trunk);
+          const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.8, 0), treeMat);
+          crown.position.set(px + (t - 1) * 1.4, 1.8, pz + (t % 2) * 0.8); crown.castShadow = true; world.add(crown);
+        }
       });
+    }
+
+    // Animated cars — simple boxes that loop along street lanes.
+    const cityCars = [];
+    function createCars(count) {
+      const carColors = [0xd64545, 0x4565d6, 0xd6d6d6, 0x45d665, 0xd6a045, 0x2a2a2e];
+      const bodyGeo = new THREE.BoxGeometry(1.6, 0.6, 0.9);
+      const cabinGeo = new THREE.BoxGeometry(0.9, 0.45, 0.8);
+      const headlightMat = new THREE.MeshStandardMaterial({ color: 0xffffe0, emissive: 0xffffcc, emissiveIntensity: 1.5 });
+      const taillightMat = new THREE.MeshStandardMaterial({ color: 0xff4040, emissive: 0xff2020, emissiveIntensity: 1.2 });
+      for (let i = 0; i < count; i++) {
+        const color = carColors[i % carColors.length];
+        const car = new THREE.Group();
+        const body = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({ color, roughness: .4, metalness: .3 }));
+        body.position.y = 0.4; body.castShadow = true; car.add(body);
+        const cabin = new THREE.Mesh(cabinGeo, new THREE.MeshStandardMaterial({ color, roughness: .5 }));
+        cabin.position.set(-0.1, 0.85, 0); car.add(cabin);
+        const hl = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.7), headlightMat);
+        hl.position.set(0.85, 0.4, 0); car.add(hl);
+        const tl = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.7), taillightMat);
+        tl.position.set(-0.85, 0.4, 0); car.add(tl);
+        // Pick a street lane (aligned to grid) and direction
+        const horizontal = Math.random() < 0.5;
+        const lane = (Math.floor(Math.random() * (CITY_EXTENT * 2 / CITY_BLOCK)) - CITY_EXTENT / CITY_BLOCK) * CITY_BLOCK;
+        const offset = (Math.random() < 0.5 ? 1 : -1) * 1.0;
+        const speed = 3 + Math.random() * 4;
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        if (horizontal) { car.position.set(-CITY_EXTENT * dir, 0, lane + offset); car.rotation.y = dir > 0 ? 0 : Math.PI; }
+        else { car.position.set(lane + offset, 0, -CITY_EXTENT * dir); car.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2; }
+        car.userData = { horizontal, lane, offset, speed, dir, pos: -CITY_EXTENT * dir };
+        world.add(car);
+        cityCars.push(car);
+      }
+    }
+
+    function updateCars(delta) {
+      const span = CITY_EXTENT * 2;
+      cityCars.forEach(car => {
+        const u = car.userData;
+        u.pos += u.speed * u.dir * delta;
+        if (u.pos > CITY_EXTENT) u.pos = -CITY_EXTENT;
+        if (u.pos < -CITY_EXTENT) u.pos = CITY_EXTENT;
+        if (u.horizontal) car.position.x = u.pos;
+        else car.position.z = u.pos;
+      });
+    }
+
+    function createCityGrid() {
+      const skyType = (sceneSpec.skyType || 'dusk');
+      createCitySky(skyType);
+      createStreetGrid();
+      if (sceneSpec.streetLights !== false) createStreetLights();
+      // Buildings — default to a rich Manhattan-style grid if the model
+      // gave none or too few. The model is expected to supply 8-20.
+      const modelBuildings = (sceneSpec.buildings || []).filter(b => typeof b === 'object');
+      const buildings = modelBuildings.length >= 4 ? modelBuildings : defaultCityBuildings();
+      // Two big instanced meshes hold ALL building voxels across the city:
+      // one for wall cubes, one for emissive window cubes. This keeps the
+      // draw-call count at 2 regardless of building count.
+      let totalWall = 0, totalWin = 0;
+      buildings.forEach(b => {
+        const w = Math.max(2, Math.round(b.width || b.w || 4));
+        const d = Math.max(2, Math.round(b.depth || b.d || 4));
+        const h = Math.max(3, Math.round(b.height || b.h || 10));
+        const perim = 2 * w + 2 * d - 4;
+        totalWall += h * perim;
+        totalWin += Math.floor(h * perim * 0.25);
+      });
+      const voxelGeo = new THREE.BoxGeometry(0.94, 0.94, 0.94);
+      voxelGeo.translate(0, 0.47, 0);
+      const wallMat = new THREE.MeshStandardMaterial({ roughness: .6, metalness: .15, vertexColors: true });
+      const winMat = new THREE.MeshStandardMaterial({ roughness: .3, metalness: .1, vertexColors: true, emissive: 0xffffff, emissiveIntensity: 0.0 });
+      const wallInst = new THREE.InstancedMesh(voxelGeo, wallMat, Math.max(1, totalWall));
+      const winInst = new THREE.InstancedMesh(voxelGeo, winMat, Math.max(1, totalWin));
+      wallInst.castShadow = wallInst.receiveShadow = true;
+      winInst.castShadow = true;
+      const wallCount = [0], winCount = [0];
+      buildings.forEach(b => createVoxelBuilding(b, wallInst, winInst, wallCount, winCount));
+      wallInst.count = wallCount[0]; winInst.count = winCount[0];
+      wallInst.instanceMatrix.needsUpdate = true; winInst.instanceMatrix.needsUpdate = true;
+      if (wallInst.instanceColor) wallInst.instanceColor.needsUpdate = true;
+      if (winInst.instanceColor) winInst.instanceColor.needsUpdate = true;
+      world.add(wallInst); world.add(winInst);
+      createParks();
+      const carCount = typeof sceneSpec.cars === 'number' ? sceneSpec.cars : 10;
+      createCars(Math.max(0, Math.min(24, carCount)));
+    }
+
+    // Fallback building grid when the model supplied too few buildings.
+    function defaultCityBuildings() {
+      const rows = [];
+      const heights = [22, 14, 28, 10, 18, 32, 12, 24, 16, 8, 20, 26, 11, 30, 15, 9, 19, 25, 13, 21];
+      let idx = 0;
+      for (let gx = -25; gx <= 25; gx += CITY_BLOCK) {
+        for (let gz = -25; gz <= 25; gz += CITY_BLOCK) {
+          if (Math.abs(gx) <= 2 && Math.abs(gz) <= 2) continue; // downtown plaza
+          const h = heights[idx % heights.length] + (idx % 3);
+          idx++;
+          rows.push({
+            x: gx + (idx % 2 ? 2 : -2), z: gz + (idx % 3 ? 2 : -2),
+            width: 4 + (idx % 3), depth: 4 + (idx % 2),
+            height: h, hue: 0.58, saturation: 0.08, lightness: 0.2 + (h % 6) * 0.01,
+            type: h > 20 ? 'setback' : 'box', windows: 0.55,
+          });
+        }
+      }
+      return rows;
     }
 
     // === EIFFEL TOWER (Paris) ===
@@ -752,6 +989,9 @@
       }
       if (cloudGroup) {
         cloudGroup.rotation.y += delta * 0.02;
+      }
+      if (typeof cityCars !== 'undefined' && cityCars.length) {
+        updateCars(delta);
       }
       if (elapsed - lastInteraction > 4) {
         const radius = 34;

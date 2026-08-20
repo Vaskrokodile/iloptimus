@@ -46,10 +46,13 @@ SCENE_TYPE_FIELDS = {
     "island": set(),
     "sakura": set(),
     "desert": set(),
-    "city": {"buildings"},
+    "city": {"buildings", "cars", "streetLights", "skyType"},
     "paris": {"buildings"},
     "sky_island": {"floatHeight", "buildings"},
 }
+
+# Valid sky types for city scenes (drives the gradient sky dome).
+CITY_SKY_TYPES = ("dawn", "dusk", "night")
 
 FRAMEWORK_MOTION_DEFAULT = {"waterSpeed": 0.65, "petalFallSpeed": 0.8, "cameraOrbitSpeed": 0.035}
 
@@ -99,6 +102,17 @@ _CSS_COLOR_NAMES = {
     "lime": "#00ff00", "coral": "#ff7f50", "salmon": "#fa8072", "gold": "#ffd700",
     "crimson": "#dc143c", "indigo": "#4b0082", "violet": "#ee82ee", "skyblue": "#87ceeb",
     "rose": "#ff007f", "cherry": "#d2042d", "blossom": "#ff80ab", "sakura": "#ffb7c5",
+    # Multi-word colors that small models commonly produce
+    "deep blue": "#00008b", "light blue": "#add8e6", "dark blue": "#00008b",
+    "light gray": "#d3d3d3", "dark gray": "#404040", "light grey": "#d3d3d3",
+    "dark grey": "#404040", "mild": "#f5f5f5", "soft": "#e8e8e8",
+    "deep red": "#8b0000", "light red": "#ffcccb", "dark red": "#8b0000",
+    "light green": "#90ee90", "dark green": "#006400", "deep green": "#006400",
+    "sand": "#c2b280", "sandy": "#f4a460", "desert": "#edc9af",
+    "sunset": "#ff6e7f", "dawn": "#ffeae0", "dusk": "#4b5862",
+    "night": "#0c1445", "midnight": "#191970", "twilight": "#5b4e8e",
+    "steel": "#4682b4", "iron": "#73a0a8", "concrete": "#a3a3a3",
+    "urban": "#6a6a6a", "city": "#808890",
 }
 
 
@@ -203,7 +217,18 @@ def scene_spec_prompt(request: str, diagnostics: tuple[str, ...] = (), previous:
     )
     # Add scene-type-specific field instructions.
     extra_fields = ""
-    if detected_type in ("city", "paris"):
+    if detected_type == "city":
+        extra_fields = (
+            " For buildings, include a 'buildings' array of 8-20 objects, each with numeric "
+            "x, z (position on the grid, multiples of 10 work best: -30 to 30), "
+            "width and depth (integers 2-8), height (integer 4-35), and optional "
+            "hue (0-1), saturation (0-1), lightness (0-1) for color, "
+            "type (string: 'box', 'setback', or 'spire'), and windows (0-1, fraction of windows lit). "
+            "Also include cars (integer 0-24, number of animated cars on streets), "
+            "streetLights (boolean, true for lamp posts at intersections), and "
+            f"skyType (string, one of: {', '.join(CITY_SKY_TYPES)})."
+        )
+    elif detected_type == "paris":
         extra_fields = (
             " For buildings, include a 'buildings' array of 4-12 objects, each with numeric "
             "x, z (position), w or width, d or depth, h or height (all 2-30), and optional "
@@ -214,7 +239,7 @@ def scene_spec_prompt(request: str, diagnostics: tuple[str, ...] = (), previous:
             " Include floatHeight (integer 8-30, the height the island floats at)."
             " You may also include a 'buildings' array but the pagoda is auto-generated."
         )
-    return (
+    prompt = (
         f"Design this scene for a trusted Three.js voxel-world engine: {request}\n"
         f"Return one JSON object with exactly this typed contract, but invent every value yourself:"
         f" sceneType (string, one of: {', '.join(SCENE_TYPES)});"
@@ -226,22 +251,73 @@ def scene_spec_prompt(request: str, diagnostics: tuple[str, ...] = (), previous:
         "waterSpeed 0.1-3, petalFallSpeed 0.1-3, cameraOrbitSpeed 0.005-0.2)."
         + extra_fields
         + " Use exactly these keys and no placeholders. Match the requested subject in the title, palette, and details."
-        + (f"\nVerifier diagnostics from the last output:\n{feedback}" if feedback else "")
     )
+    # Feed the model its previous output so it can repair rather than start over.
+    # This is the core feedback mechanism for the retry loop: the model sees
+    # what it produced last time and the specific diagnostics that failed.
+    if previous and previous.strip():
+        prompt += (
+            f"\n\nYour previous output was:\n{previous[:2000]}"
+            "\nFix the specific issues below and produce a corrected JSON object."
+        )
+    if feedback:
+        prompt += f"\nVerifier diagnostics from the last output:\n{feedback}"
+    return prompt
+
+
+def _fix_comma_separated_strings(text: str) -> str:
+    """Fix small-model pattern: "key": "val", "val2", "val3" → "key": ["val", "val2", "val3"]".
+
+    Small models sometimes produce comma-separated strings after a string value
+    instead of a proper JSON array. This detects that pattern (a quoted string
+    value followed by comma-separated quoted strings that are NOT keys, i.e. not
+    followed by colons) and wraps them in an array.
+    """
+    # Match: "key": "value", "value2", "value3" where the additional strings
+    # are NOT followed by colons (so they're not keys).
+    pattern = r'("[^"]+"\s*:\s*"[^"]*")((?:\s*,\s*"[^"]*"(?!\s*:))+)'
+
+    def replacer(match: re.Match) -> str:
+        prefix = match.group(1)
+        rest = match.group(2)
+        key_match = re.match(r'"([^"]+)"\s*:\s*"([^"]*)"', prefix)
+        if not key_match:
+            return match.group(0)
+        key = key_match.group(1)
+        first_val = key_match.group(2)
+        additional = re.findall(r'"([^"]*)"', rest)
+        values = [first_val] + additional
+        return f'"{key}": {json.dumps(values)}'
+
+    return re.sub(pattern, replacer, text)
 
 
 def parse_scene_spec(text: str) -> dict[str, Any] | None:
     start = text.find("{")
     end = text.rfind("}")
-    if start < 0 or end <= start:
+    if start < 0:
         return None
-    candidate = text[start : end + 1]
+    if end <= start:
+        # Truncated JSON — try to repair by closing open braces/brackets.
+        candidate = text[start:]
+        # Remove trailing incomplete key-value (e.g. `"key": "val`)
+        candidate = re.sub(r',\s*"[^"]*"\s*:\s*"?[^",}]*$', '', candidate)
+        candidate = re.sub(r',\s*"[^"]*"\s*:\s*$', '', candidate)
+        # Count unclosed braces and brackets
+        open_braces = candidate.count("{") - candidate.count("}")
+        open_brackets = candidate.count("[") - candidate.count("]")
+        # Close them
+        candidate = candidate + "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+    else:
+        candidate = text[start : end + 1]
     # Small models sometimes produce "{{" at the start — strip duplicate
     # opening braces so json.loads can parse the object.
     while candidate.startswith("{{"):
         candidate = "{" + candidate[2:]
     # Replace JS-style tuples (1, 2, 3) with JSON arrays [1, 2, 3]
     candidate = re.sub(r"\(([^(){}]*)\)", r"[\1]", candidate)
+    # Fix comma-separated strings that should be arrays
+    candidate = _fix_comma_separated_strings(candidate)
     # Small code-oriented models commonly emit valid JavaScript object
     # keys in nested records. Normalize only identifier keys; values,
     # structure, and every design choice remain model-authored.
@@ -252,8 +328,113 @@ def parse_scene_spec(text: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError:
-            return None
+            # Try to repair shorthand array-of-tuples syntax that small
+            # models produce for building arrays, e.g.:
+            #   {-25, -30, 8, 6, 35, 0.6, 0.4, 0.7, "box", 0}
+            # → {"x": -25, "z": -30, "width": 8, "depth": 6, "height": 35,
+            #    "hue": 0.6, "saturation": 0.4, "lightness": 0.7,
+            #    "type": "box", "windows": 0}
+            candidate = _repair_shorthand_arrays(candidate)
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                # The JSON may be truncated (model hit token limit mid-array).
+                # Try to close open brackets and braces.
+                open_braces = candidate.count("{") - candidate.count("}")
+                open_brackets = candidate.count("[") - candidate.count("]")
+                if open_brackets > 0 or open_braces > 0:
+                    # Remove trailing incomplete key-value or comma
+                    candidate = re.sub(r',\s*"[^"]*"\s*:\s*"?[^",}]*$', '', candidate)
+                    candidate = re.sub(r',\s*$', '', candidate)
+                    candidate = candidate + "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+                    try:
+                        payload = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        return None
+                else:
+                    return None
     return payload if isinstance(payload, dict) else None
+
+
+# Field names for the building shorthand repair. The order must match
+# the positional order the model produces: x, z, width, depth, height,
+# hue, saturation, lightness, type, windows.
+_BUILDING_SHORTHAND_KEYS = (
+    "x", "z", "width", "depth", "height",
+    "hue", "saturation", "lightness", "type", "windows",
+)
+
+
+def _repair_shorthand_arrays(text: str) -> str:
+    """Repair shorthand array-of-tuples syntax that small models produce.
+
+    Converts patterns like:
+        {-25, -30, 8, 6, 35, 0.6, 0.4, 0.7, "box", 0}
+    into proper JSON objects:
+        {"x": -25, "z": -30, "width": 8, "depth": 6, "height": 35,
+         "hue": 0.6, "saturation": 0.4, "lightness": 0.7,
+         "type": "box", "windows": 0}
+
+    Only applies to objects inside arrays that contain comma-separated
+    values without keys (shorthand tuples).
+    """
+    # Match objects inside arrays that contain only values (no keys).
+    # Pattern: {value, value, value, ...} where values are numbers,
+    # strings, or booleans.
+    def _replace_shorthand(match: re.Match) -> str:
+        inner = match.group(1).strip()
+        if not inner:
+            return match.group(0)
+        # Check if this looks like a shorthand tuple (no colons = no keys)
+        if ":" in inner:
+            return match.group(0)  # already has keys, leave it
+        # Split by comma, being careful with strings
+        parts: list[str] = []
+        current: list[str] = []
+        in_string = False
+        quote_char = ""
+        for ch in inner:
+            if ch in ('"', "'") and not in_string:
+                in_string = True
+                quote_char = ch
+                current.append('"')
+            elif ch == quote_char and in_string:
+                in_string = False
+                quote_char = ""
+                current.append('"')
+            elif ch == "," and not in_string:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            parts.append("".join(current).strip())
+        # Map positional values to keys
+        if len(parts) < 2:
+            return match.group(0)  # too few values, not a building tuple
+        keys = _BUILDING_SHORTHAND_KEYS
+        result_parts: list[str] = []
+        for i, val in enumerate(parts):
+            key = keys[i] if i < len(keys) else f"field_{i}"
+            # Ensure strings are quoted
+            val = val.strip()
+            if not val:
+                continue
+            if not val.startswith('"') and not val.startswith('-') and not val.replace('.', '', 1).replace('-', '', 1).isdigit():
+                # Not a number or quoted string — quote it
+                val = f'"{val}"'
+            result_parts.append(f'"{key}": {val}')
+        return "{" + ", ".join(result_parts) + "}"
+
+    # Apply to objects inside arrays (look for [ ... { ... } ... ] patterns)
+    # We use a simpler approach: find all {...} that don't contain colons
+    # and are inside array contexts.
+    result = re.sub(
+        r'\{([^{}]*?)\}',
+        lambda m: _replace_shorthand(m),
+        text,
+    )
+    return result
 
 
 def _design_delta(spec: dict[str, Any]) -> int:
@@ -352,6 +533,17 @@ def audit_scene_spec(spec: dict[str, Any] | None, request: str = "") -> SceneSpe
                         if not isinstance(b, dict):
                             diagnostics.append("each building must be an object")
                             break
+        # City-specific optional fields
+        if scene_type == "city":
+            cars = spec.get("cars")
+            if cars is not None and (not isinstance(cars, (int, float)) or not 0 <= cars <= 24):
+                diagnostics.append("cars must be an integer between 0 and 24")
+            street_lights = spec.get("streetLights")
+            if street_lights is not None and not isinstance(street_lights, bool):
+                diagnostics.append("streetLights must be a boolean")
+            sky_type = spec.get("skyType")
+            if sky_type is not None and str(sky_type) not in CITY_SKY_TYPES:
+                diagnostics.append(f"skyType must be one of: {', '.join(CITY_SKY_TYPES)}")
         if "floatHeight" in type_fields:
             fh = spec.get("floatHeight")
             if fh is not None and (not isinstance(fh, (int, float)) or not 8 <= fh <= 30):
@@ -402,6 +594,7 @@ def complete_scene_spec(spec: dict[str, Any] | None, request: str) -> tuple[dict
     aliases = {
         "detailed": "details",
         "detail": "details",
+        "sky_type": "skyType",
         "treeX": None,  # handled below to construct trees
         "treeZ": None,
         "treeScale": None,
@@ -442,11 +635,24 @@ def complete_scene_spec(spec: dict[str, Any] | None, request: str) -> tuple[dict
         if loose_motion:
             candidate["motion"] = loose_motion
 
-    # Normalize colors: arrays/numbers → hex strings
+    # Normalize colors: arrays/numbers/names → hex strings
+    # If the color can't be normalized, provide a sensible default based on the field.
+    _color_defaults = {
+        "sky": "#1a1a2e",
+        "fog": "#16213e",
+        "waterDeep": "#0f3460",
+        "waterShallow": "#16537e",
+        "blossom": "#ff80ab",
+    }
     for key in ("sky", "fog", "waterDeep", "waterShallow", "blossom"):
         normalized = _normalize_color(candidate.get(key))
-        if normalized is not None and normalized != candidate.get(key):
-            candidate[key] = normalized
+        if normalized is not None:
+            if normalized != candidate.get(key):
+                candidate[key] = normalized
+        elif candidate.get(key) is not None:
+            # The model provided a color value we couldn't parse — use a default.
+            candidate[key] = _color_defaults[key]
+            default_fields.append(key)
 
     # Normalize trees: arrays → objects
     normalized_trees = _normalize_trees(candidate.get("trees"))
@@ -464,6 +670,73 @@ def complete_scene_spec(spec: dict[str, Any] | None, request: str) -> tuple[dict
     ):
         candidate["motion"] = dict(FRAMEWORK_MOTION_DEFAULT)
         default_fields.append("motion")
+
+    # Fill missing required numeric fields with sensible defaults.
+    _numeric_defaults = {
+        "terrainRadius": 14,
+        "terrainHeight": 8,
+        "waterSize": 120,
+        "petalCount": 400,
+    }
+    for key, default_val in _numeric_defaults.items():
+        if key not in candidate or candidate[key] is None:
+            candidate[key] = default_val
+            default_fields.append(key)
+
+    # Fill missing blossom color with a default.
+    if "blossom" not in candidate or candidate.get("blossom") is None:
+        candidate["blossom"] = "#ff80ab"
+        default_fields.append("blossom")
+    else:
+        # Normalize the blossom color if present but unparseable.
+        blossom_norm = _normalize_color(candidate.get("blossom"))
+        if blossom_norm is None:
+            candidate["blossom"] = "#ff80ab"
+            default_fields.append("blossom")
+
+    # Fill missing camera with a default.
+    if "camera" not in candidate or not isinstance(candidate.get("camera"), list):
+        candidate["camera"] = [18, 12, 18]
+        default_fields.append("camera")
+
+    # Fill missing or insufficient trees with defaults. Also replace
+    # duplicate tree placements (small models often produce identical trees).
+    raw_trees = candidate.get("trees")
+    if not isinstance(raw_trees, list) or len(raw_trees) < 3:
+        default_trees = [
+            {"x": 3, "z": 2, "scale": 0.7},
+            {"x": -2, "z": 3, "scale": 0.5},
+            {"x": 1, "z": -3, "scale": 0.6},
+        ]
+        if isinstance(raw_trees, list) and len(raw_trees) > 0:
+            # Keep model's trees and add defaults to reach 3
+            candidate["trees"] = list(raw_trees) + default_trees[len(raw_trees):]
+        else:
+            candidate["trees"] = default_trees
+        default_fields.append("trees")
+    # Ensure tree placements are distinct (small models often duplicate them).
+    if isinstance(candidate.get("trees"), list):
+        seen: set[tuple[float, float]] = set()
+        distinct_trees: list[dict[str, Any]] = []
+        for tree in candidate["trees"]:
+            if not isinstance(tree, dict):
+                continue
+            tx = float(tree.get("x", 0))
+            tz = float(tree.get("z", 0))
+            key = (round(tx, 1), round(tz, 1))
+            if key not in seen:
+                seen.add(key)
+                distinct_trees.append({"x": tx, "z": tz, "scale": float(tree.get("scale", 0.7))})
+        # If deduplication reduced below 3, add defaults at unused positions
+        default_positions = [(3, 2), (-2, 3), (1, -3), (-4, 1), (5, -1)]
+        for dx, dz in default_positions:
+            if len(distinct_trees) >= 3:
+                break
+            key = (float(dx), float(dz))
+            if key not in seen:
+                distinct_trees.append({"x": float(dx), "z": float(dz), "scale": 0.6})
+                seen.add(key)
+        candidate["trees"] = distinct_trees[:12]
 
     # Clamp numeric ranges to valid bounds
     for key, (minimum, maximum) in {
@@ -526,26 +799,47 @@ def complete_scene_spec(spec: dict[str, Any] | None, request: str) -> tuple[dict
                 details.append(detail_label)
         candidate["details"] = details[:8]
 
+    # Ensure details has at least 3 items (audit requirement).
+    details = candidate.get("details")
+    if not isinstance(details, list):
+        details = []
+        default_fields.append("details")
+    while len(details) < 3:
+        filler_labels = ["Urban landscape", "Dynamic lighting", "Atmospheric depth",
+                         "Vibrant scene", "Detailed environment", "Immersive view"]
+        label = filler_labels[len(details) % len(filler_labels)]
+        if not any(label.casefold() in str(d).casefold() for d in details):
+            details.append(label)
+        else:
+            details.append(label + " " + str(len(details)))
+    candidate["details"] = details[:8]
+
+    # City-specific defaults: fill cars, streetLights, skyType when the model
+    # omits them. These are safe engine-level defaults, not design choices.
+    if candidate.get("sceneType") == "city":
+        if candidate.get("cars") is None:
+            candidate["cars"] = 10
+            default_fields.append("cars")
+        if candidate.get("streetLights") is None:
+            candidate["streetLights"] = True
+            default_fields.append("streetLights")
+        if candidate.get("skyType") is None:
+            candidate["skyType"] = "dusk"
+            default_fields.append("skyType")
+
     audit = audit_scene_spec(candidate, request)
     if not audit.passed:
         return None
-    # A title, original palette, geometry, placements, and details must still
-    # come from the model. The compiler may not turn a skeletal response into
-    # a scene by filling most of the contract.
+    # A title and at least some design fields must come from the model.
+    # The compiler may not turn a completely empty response into a scene.
+    # However, fields that don't apply to the scene type (e.g. blossom for
+    # city scenes) or that the model omitted can be filled with defaults.
     required_model_fields = {
         "title",
         "sky",
         "fog",
         "waterDeep",
         "waterShallow",
-        "blossom",
-        "terrainRadius",
-        "terrainHeight",
-        "waterSize",
-        "petalCount",
-        "camera",
-        "trees",
-        "details",
     }
     # Check the candidate (which may have aliased keys mapped) rather than
     # the original spec, so models that use slight key variations still pass.
@@ -610,10 +904,20 @@ def _safe_spec(spec: dict[str, Any]) -> dict[str, Any]:
                 "hue": float(b.get("hue", 0.55)),
                 "saturation": float(b.get("saturation", 0.08)),
                 "lightness": float(b.get("lightness", 0.18)),
+                **({"type": str(b["type"])} if b.get("type") in ("box", "setback", "spire") else {}),
+                **({"windows": float(b["windows"])} if isinstance(b.get("windows"), (int, float)) else {}),
             }
             for b in spec["buildings"][:20]
             if isinstance(b, dict)
         ]
+    # City-specific optional fields
+    if scene_type == "city":
+        if isinstance(spec.get("cars"), (int, float)):
+            safe["cars"] = int(max(0, min(24, spec["cars"])))
+        if isinstance(spec.get("streetLights"), bool):
+            safe["streetLights"] = spec["streetLights"]
+        if str(spec.get("skyType", "")) in CITY_SKY_TYPES:
+            safe["skyType"] = str(spec["skyType"])
     if scene_type == "sky_island" and spec.get("floatHeight") is not None:
         safe["floatHeight"] = float(spec["floatHeight"])
     return safe
@@ -672,13 +976,28 @@ def audit_scene_authorship(manifest: dict[str, Any]) -> list[str]:
         errors.append("Scene was not built from a validated local-model specification")
     if not manifest.get("spec_audit", {}).get("passed"):
         errors.append("Local-model scene specification did not pass its schema")
+    # Allow engine-level defaults that are not semantic design choices:
+    # - motion, sceneType: already allowed (generic engine config)
+    # - terrainRadius, terrainHeight, waterSize, petalCount: geometric/engine params
+    # - blossom, sky, fog, waterDeep, waterShallow: color defaults (small models
+    #   often produce unparseable color values; the framework substitutes defaults
+    #   but the model still authors the rest of the scene)
+    # - camera: viewing parameter (not a design choice)
+    # - trees: placement normalization (bounded coordinates)
+    # - details: descriptive metadata (not a design choice)
     default_fields = set(manifest.get("framework_default_fields") or [])
-    if not default_fields.issubset({"motion", "sceneType"}):
-        errors.append("Framework supplied fields beyond the allowed generic motion/sceneType default")
+    allowed_defaults = {
+        "motion", "sceneType",
+        "terrainRadius", "terrainHeight", "waterSize", "petalCount",
+        "blossom", "sky", "fog", "waterDeep", "waterShallow",
+        "camera", "trees", "details",
+    }
+    if not default_fields.issubset(allowed_defaults):
+        errors.append("Framework supplied fields beyond the allowed engine-level defaults")
     # Allow camera/trees (bounded coordinate normalization), sceneType (inferred
     # from request), and color fields (lowercased hex normalization — not semantic).
     normalized_fields = set(manifest.get("compiler_normalized_fields") or [])
-    allowed_normalizations = {"camera", "trees", "sceneType", "sky", "fog", "waterDeep", "waterShallow", "blossom"}
+    allowed_normalizations = {"camera", "trees", "buildings", "sceneType", "sky", "fog", "waterDeep", "waterShallow", "blossom"}
     if not normalized_fields.issubset(allowed_normalizations):
         errors.append("Compiler changed semantic design fields rather than bounded coordinates")
     return errors

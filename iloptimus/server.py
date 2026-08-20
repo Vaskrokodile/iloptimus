@@ -70,6 +70,7 @@ from .core.environments import (
 )
 from .core.failure_memory import (
     build_failure_skill,
+    delete_failure_skill,
     list_failure_skills,
     mark_skill_use,
     retrieve_failure_skills,
@@ -458,6 +459,12 @@ def create_app() -> FastAPI:
         from .core.inference import release_memory
 
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # Load the model's pre-trained adapter when no TTC adapter is given.
+        effective_adapter = adapter_path
+        if not effective_adapter and model_info.adapter_repo:
+            pretrained = resolve_adapter_path(model_info.id)
+            if pretrained:
+                effective_adapter = Path(pretrained)
         async with _chat_model_lock:
             _chat_models.clear()
             await _run_in_executor(release_memory)
@@ -465,7 +472,7 @@ def create_app() -> FastAPI:
                 load_model,
                 model_info.huggingface_id,
                 precision,
-                adapter_path=str(adapter_path) if adapter_path else None,
+                adapter_path=str(effective_adapter) if effective_adapter else None,
                 source_override=source,
             )
             result = await _run_in_executor(
@@ -476,7 +483,7 @@ def create_app() -> FastAPI:
                 3_072,
                 0.0,
             )
-            destination.write_text((result.answer or result.text).strip() + "\n", encoding="utf-8")
+            destination.write_text(((result.answer or result.text) or "").strip() + "\n", encoding="utf-8")
             del handle
             await _run_in_executor(release_memory)
         return result
@@ -502,6 +509,12 @@ def create_app() -> FastAPI:
         components: dict[str, str] = {}
         audits = {}
         attempts: dict[str, int] = {}
+        # Load the model's pre-trained adapter when no TTC adapter is given.
+        effective_adapter = adapter_path
+        if not effective_adapter and model_info.adapter_repo:
+            pretrained = resolve_adapter_path(model_info.id)
+            if pretrained:
+                effective_adapter = Path(pretrained)
         async with _chat_model_lock:
             _chat_models.clear()
             await _run_in_executor(release_memory)
@@ -509,7 +522,7 @@ def create_app() -> FastAPI:
                 load_model,
                 model_info.huggingface_id,
                 precision,
-                adapter_path=str(adapter_path) if adapter_path else None,
+                adapter_path=str(effective_adapter) if effective_adapter else None,
                 source_override=source,
             )
             for index, component in enumerate(threejs_component_plan()):
@@ -589,6 +602,14 @@ def create_app() -> FastAPI:
         total_tokens = 0
         attempts: dict[str, int] = {}
         manifest: dict[str, Any] | None = None
+        # When no TTC-trained adapter is given, load the model's pre-trained
+        # adapter (e.g. boosted-v1-small) so the baseline reflects the model's
+        # actual trained capability — not the raw base model.
+        effective_adapter = adapter_path
+        if not effective_adapter and model_info.adapter_repo:
+            pretrained = resolve_adapter_path(model_info.id)
+            if pretrained:
+                effective_adapter = Path(pretrained)
         async with _chat_model_lock:
             _chat_models.clear()
             await _run_in_executor(release_memory)
@@ -596,7 +617,7 @@ def create_app() -> FastAPI:
                 load_model,
                 model_info.huggingface_id,
                 precision,
-                adapter_path=str(adapter_path) if adapter_path else None,
+                adapter_path=str(effective_adapter) if effective_adapter else None,
                 source_override=source,
             )
             for attempt in range(1, 6):
@@ -613,7 +634,7 @@ def create_app() -> FastAPI:
                     run_json_completion,
                     handle,
                     scene_spec_prompt(query, diagnostics, previous_output),
-                    650,
+                    1024,
                     0.0,
                 )
                 total_tokens += result.tokens_generated
@@ -630,6 +651,7 @@ def create_app() -> FastAPI:
                         {
                             "model_id": model_info.id,
                             "adapter_path": str(adapter_path) if adapter_path else "",
+                            "pretrained_adapter_path": str(effective_adapter) if (effective_adapter and not adapter_path) else "",
                             "attempts": attempt,
                             "model_scene_spec": spec,
                             "model_authored_fields": sorted(set(completed_spec) - set(default_fields)),
@@ -669,6 +691,47 @@ def create_app() -> FastAPI:
             passed=False,
             hard_gates={**evaluation.hard_gates, "model_authorship": False},
             diagnostics=[*evaluation.diagnostics, *errors],
+        )
+
+    def _enforce_city_richness(evaluation, manifest: dict[str, Any]):
+        """Cap the score of sparse city scenes so the training + dataset loop
+        is forced to run. A city with fewer than 8 buildings, no cars, no
+        street lights, or no sky type is considered sparse and capped below
+        the leap threshold (0.98). This prevents a minimal city from being
+        accepted as "perfect" and forces the model to actually learn to
+        produce richer scenes.
+        """
+        model_spec = manifest.get("model_scene_spec") or {}
+        if not isinstance(model_spec, dict) or model_spec.get("sceneType") != "city":
+            return evaluation
+        diagnostics: list[str] = []
+        buildings = model_spec.get("buildings") or []
+        model_buildings = [b for b in buildings if isinstance(b, dict)] if isinstance(buildings, list) else []
+        # Count how many of the richness features the model actually authored
+        # (not framework defaults). The manifest tracks which fields came from
+        # the model vs. the framework.
+        model_fields = set(manifest.get("model_authored_fields") or [])
+        default_fields = set(manifest.get("framework_default_fields") or [])
+        richness_features = {"cars", "streetLights", "skyType"}
+        model_richness = richness_features & model_fields
+        default_richness = richness_features & default_fields
+        if len(model_buildings) < 8:
+            diagnostics.append(
+                f"City richness: only {len(model_buildings)} buildings authored (need 8+ for a rich cityscape)"
+            )
+        if default_richness:
+            diagnostics.append(
+                f"City richness: {', '.join(sorted(default_richness))} were filled by framework defaults, not authored by the model"
+            )
+        if not diagnostics:
+            return evaluation
+        # Cap below the leap threshold so training + dataset loop run.
+        capped_score = min(evaluation.score, 0.85)
+        return replace(
+            evaluation,
+            score=capped_score,
+            passed=capped_score >= 0.72,
+            diagnostics=[*evaluation.diagnostics, *diagnostics],
         )
 
     async def _collect_ttc_sources(
@@ -957,6 +1020,7 @@ def create_app() -> FastAPI:
             baseline = await asyncio.to_thread(evaluate_artifact, baseline_path, contract)
             if composed_threejs:
                 baseline = _enforce_model_authorship(baseline, baseline_result.manifest)
+                baseline = _enforce_city_richness(baseline, baseline_result.manifest)
             phase_timings["baseline_generation_and_verification_seconds"] = round(
                 time.perf_counter() - baseline_started, 3
             )
@@ -1357,6 +1421,9 @@ def create_app() -> FastAPI:
                 max_seq_length=_syn_seq_len,
                 max_reasoning_tokens=24,
                 max_answer_tokens=48,
+                # Build on the model's pre-trained adapter (e.g. boosted-v1)
+                # so TTC training accumulates on top of existing capabilities.
+                adapter_path=resolve_adapter_path(session.model_id) if model_info.adapter_repo else None,
             )
             run = create_run(config)
             session.run_id = run.id
@@ -1442,6 +1509,7 @@ def create_app() -> FastAPI:
                     )
             if composed_threejs:
                 adapted = _enforce_model_authorship(adapted, adapted_result.manifest)
+                adapted = _enforce_city_richness(adapted, adapted_result.manifest)
             session.adapted_evaluation = adapted.public()
             acceptance = acceptance_decision(baseline, adapted)
             session.acceptance = acceptance
@@ -1468,7 +1536,6 @@ def create_app() -> FastAPI:
                     summarize_impact_log,
                 )
                 from .core.dataset_loop import LoopResult
-                from .core.dataset_tools import load_filtered_dataset
 
                 loop_config = LoopConfig(
                     max_iterations=12,
@@ -1693,6 +1760,7 @@ def create_app() -> FastAPI:
                         max_seq_length=_syn_seq_len,
                         max_reasoning_tokens=24,
                         max_answer_tokens=48,
+                        adapter_path=resolve_adapter_path(session.model_id) if model_info.adapter_repo else None,
                     ))
                     learning.emit(
                         session_id, "dataset-loop",
@@ -1720,13 +1788,15 @@ def create_app() -> FastAPI:
 
                     new_adapter_path = run_dir(new_run.id) / "adapters" / "sft"
                     new_adapted_path = root / f"adapted-loop-{loop_iter}" / contract.entrypoint
+                    new_loop_manifest: dict[str, Any] = {}
                     if composed_threejs:
-                        await _generate_scene_spec_artifact(
+                        new_loop_result = await _generate_scene_spec_artifact(
                             model_info, precision, source, query,
                             new_adapted_path, adapter_path=new_adapter_path,
                             session_id=session_id,
                             progress=0.90 + 0.03 * loop_iter / loop_config.max_iterations,
                         )
+                        new_loop_manifest = new_loop_result.manifest or {}
                     else:
                         await _generate_ttc_artifact(
                             model_info, precision, source, generation_prompt,
@@ -1753,6 +1823,9 @@ def create_app() -> FastAPI:
                                 hard_gates={**new_adapted.hard_gates, "runtime_render": True},
                                 score=min(1.0, new_adapted.score + 0.07),
                             )
+                    if composed_threejs and new_loop_manifest:
+                        new_adapted = _enforce_model_authorship(new_adapted, new_loop_manifest)
+                        new_adapted = _enforce_city_richness(new_adapted, new_loop_manifest)
                     new_acceptance = acceptance_decision(baseline, new_adapted)
                     loop_elapsed = completed_loop.elapsed_seconds
 
@@ -2032,7 +2105,7 @@ def create_app() -> FastAPI:
                 + query
                 + "\n\n"
                 + "\n\n".join(
-                    f"{source['title']}\n{re.sub(r'\\s+', ' ', source['text']).strip()[:1200]}\nSource: {source['url']}"
+                    f"{source.get('title', 'Untitled')}\n{re.sub(r'\\s+', ' ', str(source.get('text') or '')).strip()[:1200]}\nSource: {source.get('url', '')}"
                     for source in sources[:4]
                 )
             )
@@ -2147,7 +2220,7 @@ def create_app() -> FastAPI:
                 learned = await _run_in_executor(run_inference, adapted_handle, query, 256, 512)
                 del adapted_handle
                 await _run_in_executor(release_memory)
-            final_answer = learned.answer or learned.text
+            final_answer = learned.answer or learned.text or ""
             if not final_answer.strip():
                 raise RuntimeError("The adapted model returned no answer")
             if not re.search(r"https?://", final_answer):
@@ -3241,6 +3314,13 @@ def create_app() -> FastAPI:
     @app.get("/api/learning-skills")
     async def get_failure_skills():
         return {"skills": [skill.public() for skill in list_failure_skills()]}
+
+    @app.delete("/api/learning-skills/{skill_id}")
+    async def delete_failure_skill_endpoint(skill_id: str):
+        deleted = delete_failure_skill(skill_id)
+        if not deleted:
+            raise HTTPException(404, "Failure skill not found")
+        return {"deleted": True, "skill_id": skill_id}
 
     @app.get("/api/learning/{session_id}")
     async def get_learning_session(session_id: str):

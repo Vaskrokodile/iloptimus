@@ -56,6 +56,17 @@ THEME_PALETTES = {
         {"sky": "#22223b", "fog": "#4a4e69", "waterDeep": "#1a1a2e", "waterShallow": "#4a4e69", "blossom": "#9a8c98"},
         {"sky": "#264653", "fog": "#2a9d8f", "waterDeep": "#1a1a2e", "waterShallow": "#2a9d8f", "blossom": "#e9c46a"},
     ],
+    "city": [
+        {"sky": "#0d1b3e", "fog": "#3a2a5e", "waterDeep": "#0f1a2e", "waterShallow": "#1a2a4e", "blossom": "#ff6b4a"},
+        {"sky": "#1a2348", "fog": "#6b4a8c", "waterDeep": "#0f1a2e", "waterShallow": "#1a3a5c", "blossom": "#ff9e6b"},
+        {"sky": "#05070f", "fog": "#0a1228", "waterDeep": "#020408", "waterShallow": "#0a1428", "blossom": "#141a30"},
+        {"sky": "#1a1a2e", "fog": "#16213e", "waterDeep": "#0f3460", "waterShallow": "#16537e", "blossom": "#e94560"},
+        {"sky": "#2a1a3e", "fog": "#3e2a4e", "waterDeep": "#1a0a2e", "waterShallow": "#2a1a4e", "blossom": "#ff4a6b"},
+    ],
+    "paris": [
+        {"sky": "#3a3328", "fog": "#5a4a3a", "waterDeep": "#1a3a5c", "waterShallow": "#2a5a7c", "blossom": "#8b7355"},
+        {"sky": "#2a2a3e", "fog": "#3e3e5a", "waterDeep": "#1a2a4e", "waterShallow": "#2a4a6e", "blossom": "#d4a020"},
+    ],
 }
 
 THEME_DETAILS = {
@@ -103,6 +114,21 @@ THEME_DETAILS = {
         ["central shrine", "stone steps", "reflecting pool", "wind swirl"],
         ["garden terrace", "wooden walkway", "stone lantern", "petal shower"],
     ],
+    "city": [
+        ["skyscrapers", "street grid", "window lights", "downtown plaza", "traffic flow"],
+        ["high-rise towers", "avenue grid", "lit windows", "urban park", "rooftop water tanks"],
+        ["office buildings", "city blocks", "neon signs", "street lamps", "antenna spires"],
+        ["apartment towers", "grid streets", "glowing facades", "plaza fountain", "car traffic"],
+        ["corporate towers", "manhattan grid", "window glow", "pocket park", "street lights"],
+        ["residential blocks", "avenue grid", "lit windows", "rooftop details", "moving cars"],
+        ["downtown skyline", "street network", "window lights", "urban plaza", "traffic lanes"],
+        ["tower district", "grid layout", "emissive windows", "city park", "lamp posts"],
+    ],
+    "paris": [
+        ["eiffel tower", "haussmann buildings", "seine river", "city lights"],
+        ["parisian boulevard", "iron lattice tower", "riverside quay", "lamplit streets"],
+        ["french capital", "wrought-iron spire", "waterway bridge", "warm glow"],
+    ],
 }
 
 TREE_LAYOUTS = [
@@ -137,10 +163,14 @@ CAMERA_ANGLES = [
 def _detect_theme(request: str) -> str:
     """Detect the scene theme from the request text."""
     request_lower = request.lower()
-    for theme in ("sakura", "cherry", "desert", "forest", "ocean", "island"):
+    for theme in ("sakura", "cherry", "desert", "forest", "ocean", "island", "city", "paris", "nyc", "new york"):
         if theme in request_lower:
             if theme in ("sakura", "cherry"):
                 return "sakura"
+            if theme in ("city", "nyc", "new york"):
+                return "city"
+            if theme == "paris":
+                return "paris"
             return theme
     return "default"
 
@@ -160,6 +190,12 @@ def _generate_titles(theme: str, request: str) -> list[str]:
                     "Coral Reef Island", "Wave Dance Isle", "Deep Blue Sanctuary"],
         "default": ["Voxel Island Sanctuary", "Island Retreat", "Voxel Cove",
                     "Island Haven", "Voxel Bay", "Island Sanctuary"],
+        "city": ["NYC Voxel Skyline", "Manhattan Grid City", "Downtown Voxel City",
+                 "New York Skyline", "City Block District", "Urban Tower Grid",
+                 "NYC Night Cityscape", "Manhattan Avenue Grid", "Voxel Metropolis",
+                 "New York Tower District", "City Skyline Dusk", "Downtown Grid City"],
+        "paris": ["Paris Voxel City", "Seine River District", "Eiffel Tower City",
+                  "Parisian Boulevard", "French Capital Grid"],
     }
     return base.get(theme, base["default"])
 
@@ -194,8 +230,97 @@ def _make_spec(
     }
 
 
-def _scene_spec_prompt(request: str) -> str:
-    return (
+# City building generation — produces 8-20 buildings on a Manhattan-style grid.
+_CITY_SKY_TYPES = ("dawn", "dusk", "night")
+_CITY_BUILDING_TYPES = ("box", "setback", "spire")
+_CITY_HEIGHT_PROFILES = [
+    # (min_h, max_h, weight) — taller buildings are less common
+    (4, 8, 0.25), (8, 14, 0.30), (14, 22, 0.25), (22, 32, 0.15), (32, 35, 0.05),
+]
+
+
+def _generate_city_buildings(rng: random.Random, count: int) -> list[dict[str, Any]]:
+    """Generate a varied set of city buildings on a grid."""
+    buildings: list[dict[str, Any]] = []
+    # Grid positions: multiples of 10 from -30 to 30, skip the center plaza
+    grid_positions = []
+    for gx in range(-30, 31, 10):
+        for gz in range(-30, 31, 10):
+            if abs(gx) <= 5 and abs(gz) <= 5:
+                continue  # downtown plaza
+            grid_positions.append((gx, gz))
+    rng.shuffle(grid_positions)
+    for i in range(min(count, len(grid_positions))):
+        gx, gz = grid_positions[i]
+        # Pick a height from the weighted profiles
+        profile = rng.choices(
+            _CITY_HEIGHT_PROFILES,
+            weights=[p[2] for p in _CITY_HEIGHT_PROFILES],
+        )[0]
+        height = rng.randint(profile[0], profile[1])
+        # Building type based on height
+        if height >= 22:
+            btype = rng.choice(["setback", "spire", "setback"])
+        elif height >= 14:
+            btype = rng.choice(["setback", "box", "box"])
+        else:
+            btype = "box"
+        # Offset within the block
+        ox = rng.choice([-2, 0, 2])
+        oz = rng.choice([-2, 0, 2])
+        buildings.append({
+            "x": gx + ox,
+            "z": gz + oz,
+            "width": rng.randint(3, 6),
+            "depth": rng.randint(3, 6),
+            "height": height,
+            "hue": round(rng.uniform(0.55, 0.62), 2),
+            "saturation": round(rng.uniform(0.05, 0.12), 2),
+            "lightness": round(rng.uniform(0.18, 0.25), 2),
+            "type": btype,
+            "windows": round(rng.uniform(0.4, 0.7), 2),
+        })
+    return buildings
+
+
+def _make_city_spec(
+    palette: dict[str, str],
+    title: str,
+    details: list[str],
+    motion: dict[str, float],
+    camera: list[float],
+    rng: random.Random,
+) -> dict[str, Any]:
+    """Generate a city scene spec with buildings, cars, street lights, and sky type."""
+    building_count = rng.randint(8, 20)
+    buildings = _generate_city_buildings(rng, building_count)
+    sky_type = rng.choice(_CITY_SKY_TYPES)
+    cars = rng.randint(6, 18)
+    return {
+        "sceneType": "city",
+        "title": title,
+        "sky": palette["sky"],
+        "fog": palette["fog"],
+        "waterDeep": palette["waterDeep"],
+        "waterShallow": palette["waterShallow"],
+        "blossom": palette["blossom"],
+        "terrainRadius": 14,
+        "terrainHeight": 8,
+        "waterSize": 120,
+        "petalCount": 400,
+        "camera": camera,
+        "trees": [{"x": 3, "z": 2, "scale": 0.7}, {"x": -3, "z": 4, "scale": 0.5}, {"x": 5, "z": -2, "scale": 0.6}],
+        "details": details,
+        "motion": motion,
+        "buildings": buildings,
+        "cars": cars,
+        "streetLights": True,
+        "skyType": sky_type,
+    }
+
+
+def _scene_spec_prompt(request: str, theme: str = "default") -> str:
+    base = (
         f"Design this scene for a trusted Three.js voxel-world engine: {request}\n"
         "Return one JSON object with exactly these keys: "
         "title (string), sky/fog/waterDeep/waterShallow/blossom (hex colors like #ff80ab), "
@@ -203,6 +328,16 @@ def _scene_spec_prompt(request: str) -> str:
         "petalCount (int 120-1200), camera (3 numbers), trees (3+ objects with x/z/scale), "
         "details (3+ strings), motion (waterSpeed/petalFallSpeed/cameraOrbitSpeed numbers)."
     )
+    if theme == "city":
+        base += (
+            " sceneType (string 'city'). Include a 'buildings' array of 8-20 objects, each with "
+            "x, z (position, multiples of 10 from -30 to 30), width and depth (integers 2-8), "
+            "height (integer 4-35), hue (0-1), saturation (0-1), lightness (0-1), "
+            "type ('box', 'setback', or 'spire'), and windows (0-1). "
+            "Also include cars (integer 0-24), streetLights (boolean), and "
+            f"skyType (string, one of: {', '.join(_CITY_SKY_TYPES)})."
+        )
+    return base
 
 
 def generate_evolved_dataset(
@@ -223,7 +358,7 @@ def generate_evolved_dataset(
     palettes = THEME_PALETTES.get(theme, THEME_PALETTES["default"])
     titles = _generate_titles(theme, request)
     details_sets = THEME_DETAILS.get(theme, THEME_DETAILS["default"])
-    prompt = _scene_spec_prompt(request)
+    prompt = _scene_spec_prompt(request, theme)
 
     rows: list[dict[str, Any]] = []
 
@@ -231,33 +366,37 @@ def generate_evolved_dataset(
         palette = palettes[rng.randint(0, len(palettes) - 1)]
         title = titles[rng.randint(0, len(titles) - 1)]
         details = details_sets[rng.randint(0, len(details_sets) - 1)]
-        trees = TREE_LAYOUTS[rng.randint(0, len(TREE_LAYOUTS) - 1)]
         motion = MOTION_PRESETS[rng.randint(0, len(MOTION_PRESETS) - 1)]
         camera = CAMERA_ANGLES[rng.randint(0, len(CAMERA_ANGLES) - 1)]
 
-        terrain_radius = rng.randint(10, 20)
-        terrain_height = rng.randint(4, 10)
-        water_size = rng.randint(80, 200)
-        petal_count = rng.randint(200, 1000)
+        if theme == "city":
+            spec = _make_city_spec(palette, title, details, motion, camera, rng)
+        else:
+            trees = TREE_LAYOUTS[rng.randint(0, len(TREE_LAYOUTS) - 1)]
+            terrain_radius = rng.randint(10, 20)
+            terrain_height = rng.randint(4, 10)
+            water_size = rng.randint(80, 200)
+            petal_count = rng.randint(200, 1000)
+            spec = _make_spec(
+                palette, title, details, trees, motion, camera,
+                terrain_radius, terrain_height, water_size, petal_count,
+            )
 
-        spec = _make_spec(
-            palette, title, details, trees, motion, camera,
-            terrain_radius, terrain_height, water_size, petal_count,
-        )
-
-        # On later iterations, add extra trees for richer scenes
-        if iteration >= 2 and rng.random() < 0.4:
+        # On later iterations, add extra trees for richer scenes (non-city only;
+        # city scenes use buildings + parks instead of dense trees)
+        if iteration >= 2 and rng.random() < 0.4 and theme != "city":
             extra_trees = []
+            tr = spec.get("terrainRadius", 14)
             for _ in range(rng.randint(1, 3)):
-                ex = rng.uniform(-terrain_radius + 2, terrain_radius - 2)
-                ez = rng.uniform(-terrain_radius + 2, terrain_radius - 2)
+                ex = rng.uniform(-tr + 2, tr - 2)
+                ez = rng.uniform(-tr + 2, tr - 2)
                 es = rng.uniform(0.4, 1.2)
                 extra_trees.append({"x": round(ex, 1), "z": round(ez, 1), "scale": round(es, 2)})
             spec["trees"] = spec["trees"] + extra_trees
 
         # On later iterations, add richer details
         if iteration >= 1 and rng.random() < 0.5:
-            theme_words = theme.split() + ["island", "shore", "voxel", "terrain"]
+            theme_words = theme.split() + (["island", "shore", "voxel", "terrain"] if theme != "city" else ["skyline", "grid", "tower", "avenue"])
             spec["details"] = spec["details"] + [theme_words[rng.randint(0, len(theme_words) - 1)]]
 
         rows.append({
@@ -269,7 +408,7 @@ def generate_evolved_dataset(
             "source_hash": hashlib.sha256(
                 json.dumps(spec, sort_keys=True).encode()
             ).hexdigest()[:16],
-            "features": ["three.js", "voxel", "shader", "animation", "island", theme],
+            "features": ["three.js", "voxel", "shader", "animation", "island", theme] if theme != "city" else ["three.js", "voxel", "shader", "animation", "city", "responsive"],
             "quality_score": 0.9 + min(0.09, iteration * 0.02),
         })
 
@@ -294,21 +433,24 @@ def _generate_targeted_examples(
     palettes = THEME_PALETTES.get(theme, THEME_PALETTES["default"])
     titles = _generate_titles(theme, request)
     details_sets = THEME_DETAILS.get(theme, THEME_DETAILS["default"])
-    prompt = _scene_spec_prompt(request)
+    prompt = _scene_spec_prompt(request, theme)
 
     for failure in failures[:10]:
         palette = palettes[rng.randint(0, len(palettes) - 1)]
         title = titles[rng.randint(0, len(titles) - 1)]
         details = details_sets[rng.randint(0, len(details_sets) - 1)]
-        trees = TREE_LAYOUTS[rng.randint(0, len(TREE_LAYOUTS) - 1)]
         motion = MOTION_PRESETS[rng.randint(0, len(MOTION_PRESETS) - 1)]
         camera = CAMERA_ANGLES[rng.randint(0, len(CAMERA_ANGLES) - 1)]
 
-        spec = _make_spec(
-            palette, title, details, trees, motion, camera,
-            rng.randint(10, 20), rng.randint(4, 10),
-            rng.randint(80, 200), rng.randint(200, 1000),
-        )
+        if theme == "city":
+            spec = _make_city_spec(palette, title, details, motion, camera, rng)
+        else:
+            trees = TREE_LAYOUTS[rng.randint(0, len(TREE_LAYOUTS) - 1)]
+            spec = _make_spec(
+                palette, title, details, trees, motion, camera,
+                rng.randint(10, 20), rng.randint(4, 10),
+                rng.randint(80, 200), rng.randint(200, 1000),
+            )
 
         failure_type = failure.get("type", "unknown")
 

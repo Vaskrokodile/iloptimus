@@ -669,7 +669,7 @@ def _runtime_render(path: Path) -> tuple[bool, str, str]:
                         command,
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
-                        text=True,
+                        text=True, encoding="utf-8", errors="replace",
                         # Animated artifacts can keep Chrome's event loop alive
                         # after the screenshot is already written. Bound this
                         # verifier overhead; a timed-out process still needs a
@@ -824,12 +824,12 @@ def evaluate_artifact(path: Path, contract: ArtifactContract) -> ArtifactEvaluat
                     checked = subprocess.run(
                         ["node", "--check", str(module)],
                         capture_output=True,
-                        text=True,
+                        text=True, encoding="utf-8", errors="replace",
                         timeout=10,
                     )
                 syntax_ok = checked.returncode == 0
                 if not syntax_ok:
-                    diagnostics.append((checked.stderr or checked.stdout).strip()[-1200:])
+                    diagnostics.append((checked.stderr or checked.stdout or "").strip()[-1200:])
             except (FileNotFoundError, subprocess.SubprocessError):
                 syntax_ok = False
                 diagnostics.append("Node.js syntax verification was unavailable")
@@ -1014,7 +1014,7 @@ def sample_repository(
             cloned = subprocess.run(
                 ["git", "clone", "--depth", "1", "--filter=blob:none", "--no-checkout", repository_url, str(root)],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=90,
             )
             if cloned.returncode:
@@ -1025,7 +1025,7 @@ def sample_repository(
                 shown_license = subprocess.run(
                     ["git", "-C", str(root), "show", f"HEAD:{license_path}"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=20,
                 )
                 if shown_license.returncode:
@@ -1047,7 +1047,7 @@ def sample_repository(
             listed = subprocess.run(
                 ["git", "-C", str(root), "ls-tree", "-r", "--name-only", "HEAD"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=30,
                 check=True,
             ).stdout.splitlines()
@@ -1056,7 +1056,7 @@ def sample_repository(
                 size = subprocess.run(
                     ["git", "-C", str(root), "cat-file", "-s", f"HEAD:{path}"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=10,
                 )
                 if size.returncode or not size.stdout.strip().isdigit() or int(size.stdout) > 80_000:
@@ -1064,7 +1064,7 @@ def sample_repository(
                 shown = subprocess.run(
                     ["git", "-C", str(root), "show", f"HEAD:{path}"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=30,
                 )
                 if shown.returncode or not shown.stdout.strip():

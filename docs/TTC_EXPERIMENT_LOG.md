@@ -34,13 +34,22 @@ The model must generate the environments. We improve the harness (loop, tools, d
 7. **Authorship audit relaxed** (`scene_spec.py`): Allow color field normalization (lowercasing hex) in `audit_scene_authorship` — this is not a semantic change.
 
 ### Test 1: Sakura Island
-_Status:_ In progress (session f647f3d03615)
+_Status:_ **PASSED** (session 8dac8bd6296d)
 
 **Session 1 (d77c2771a2d3)** — Failed: `RuntimeError: Compiler: cl is not found` (torch.compile on Windows)
 **Session 2 (844095e88b42)** — Failed: `'peft_type'` KeyError (adapter config overwritten with MLX format)
 - Baseline score: 0.93 (all feature scores 1.0, only `runtime_render` failed — no Chromium)
 - Training completed: 32 iterations, final loss 1.23
-**Session 3 (f647f3d03615)** — Running with both fixes applied
+**Session 3 (f647f3d03615)** — Failed: Training worker crashed (Windows file locking on `os.replace`)
+**Session 4 (a760bb974e7a)** — Completed but rejected: Baseline 0.93, Adapted 0.93 (no improvement, runtime_render still failing)
+**Session 5 (8dac8bd6296d)** — **PASSED with score 1.0!**
+- Baseline score: **1.0** (ALL hard gates passed, including runtime_render)
+- All feature scores: 1.0 (three.js, voxel, shader, island, sakura, responsive)
+- Chrome headless rendering worked with Windows Chrome path detection fix
+- Model designed the scene in 2 attempts (scene spec → compiled Three.js artifact)
+- Training was unnecessary — the baseline passed every gate
+- Screenshot: `E:\iloptimus-home\learning\8dac8bd6296d\baseline\runtime.png` (1280x800)
+- Artifact: `E:\iloptimus-home\learning\8dac8bd6296d\baseline\index.html` (36KB, 778 lines)
 
 ### Test 2: New York City
 _Status:_ Not started

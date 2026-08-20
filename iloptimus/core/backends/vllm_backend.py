@@ -137,11 +137,11 @@ def _convert_mlx_adapter_to_peft(mlx_path: str) -> str:
             tensor = f.get_tensor(key)
             # key: model.layers.{N}.self_attn.{proj}.lora_a  or  .lora_b
             if key.endswith(".lora_a"):
-                peft_key = key.replace(".lora_a", ".lora_A.weight")
+                peft_key = key.replace(".lora_a", ".lora_A.default.weight")
                 # MLX [in, rank] -> PEFT [rank, in]
                 peft_state_dict[peft_key] = tensor.t().contiguous()
             elif key.endswith(".lora_b"):
-                peft_key = key.replace(".lora_b", ".lora_B.weight")
+                peft_key = key.replace(".lora_b", ".lora_B.default.weight")
                 # MLX [rank, out] -> PEFT [out, rank]
                 peft_state_dict[peft_key] = tensor.t().contiguous()
             else:
@@ -960,6 +960,37 @@ class VLLMBackend(Backend):
                 pass
 
         is_peft = hasattr(model, "peft_type") or model.__class__.__name__.startswith("Peft")
+        if is_peft:
+            # A pre-trained adapter (e.g. boosted-v1) is already loaded as a
+            # PEFT wrapper. Merge it into the base model so we can train a
+            # fresh LoRA adapter on top. This preserves the pre-trained
+            # knowledge while allowing new learning. We merge rather than
+            # unfreeze because gradient checkpointing (needed for memory)
+            # crashes with PEFT wrappers.
+            try:
+                merged = model.merge_and_unload()
+                model = merged
+                handle.backend_obj["hf_model"] = model
+                handle.backend_obj["peft_model"] = None
+                handle.model = model
+                print("Merged pre-trained LoRA adapter into base model for fresh training")
+                is_peft = False
+            except Exception as exc:
+                print(f"Could not merge pre-trained adapter ({exc}); unfreezing existing params")
+                import torch as _torch
+                trainable_count = 0
+                for name, param in model.named_parameters():
+                    if "lora_" in name:
+                        param.requires_grad = True
+                        trainable_count += 1
+                print(f"Unfroze {trainable_count} pre-trained LoRA parameters for cumulative training")
+                # Disable gradient checkpointing for PEFT models
+                if config.grad_checkpoint:
+                    try:
+                        model.gradient_checkpointing_disable()
+                    except Exception:
+                        pass
+                    print("Gradient checkpointing disabled for PEFT model (compatibility)")
         if not is_peft:
             try:
                 model = prepare_model_for_kbit_training(model)

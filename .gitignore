@@ -25,3 +25,6 @@ il_sft_adapters_*/
 il_grpo_adapters_*/
 il_reasoning_traces_*.json
 run_*_events.log
+session_*.json
+ttc_*.json
+commit_msg.txt
