@@ -1,0 +1,234 @@
+{
+  "version": 2,
+  "model_id": "boosted-v1-small",
+  "contract": {
+    "task_type": "artifact",
+    "artifact_kind": "web",
+    "entrypoint": "index.html",
+    "requested_features": [
+      "three.js",
+      "voxel",
+      "shader",
+      "island",
+      "sakura",
+      "responsive"
+    ],
+    "minimum_bytes": 8000,
+    "requires_javascript_syntax": true
+  },
+  "generation_strategy": "local-model-scene-spec+trusted-voxel-island-runtime",
+  "model_authorship": {
+    "version": 2,
+    "authorship": "local-model-scene-spec",
+    "fallback_used": false,
+    "runtime": "trusted-multi-scene-threejs-engine",
+    "scene_type": "sakura",
+    "source_scene_spec": {
+      "sceneType": "sakura",
+      "title": "Cherry Blossom Island",
+      "sky": "#87CEEB",
+      "fog": "#FFF9F1",
+      "waterDeep": "#8B4513",
+      "waterShallow": "#9C2236",
+      "blossom": "#FFD700",
+      "terrainRadius": 12,
+      "terrainHeight": 10,
+      "waterSize": 150,
+      "petalCount": 600,
+      "camera": [
+        100,
+        100,
+        100
+      ],
+      "trees": [
+        {
+          "x": 50,
+          "z": 50,
+          "scale": 0.5
+        },
+        {
+          "x": 150,
+          "z": 150,
+          "scale": 0.5
+        },
+        {
+          "x": 250,
+          "z": 250,
+          "scale": 0.5
+        }
+      ],
+      "details": [
+        "falling",
+        "vibrant",
+        "sunlight"
+      ],
+      "motion": {
+        "waterSpeed": 2,
+        "petalFallSpeed": 2,
+        "cameraOrbitSpeed": 0.1
+      }
+    },
+    "scene_spec": {
+      "title": "Cherry Blossom Island",
+      "sceneType": "sakura",
+      "sky": "#87ceeb",
+      "fog": "#fff9f1",
+      "waterDeep": "#8b4513",
+      "waterShallow": "#9c2236",
+      "blossom": "#ffd700",
+      "terrainRadius": 12.0,
+      "terrainHeight": 10.0,
+      "waterSize": 150.0,
+      "petalCount": 600,
+      "camera": [
+        32.0,
+        32.0,
+        32.0
+      ],
+      "trees": [
+        {
+          "x": -5.5,
+          "z": -5.5,
+          "scale": 0.5
+        },
+        {
+          "x": 0.0,
+          "z": 0.0,
+          "scale": 0.5
+        },
+        {
+          "x": 5.5,
+          "z": 5.5,
+          "scale": 0.5
+        }
+      ],
+      "details": [
+        "falling",
+        "vibrant",
+        "sunlight"
+      ],
+      "motion": {
+        "waterSpeed": 2.0,
+        "petalFallSpeed": 2.0,
+        "cameraOrbitSpeed": 0.1
+      }
+    },
+    "compiler_normalized_fields": [
+      "sky",
+      "fog",
+      "waterDeep",
+      "waterShallow",
+      "blossom",
+      "camera",
+      "trees"
+    ],
+    "scene_spec_sha256": "f2471dacab6a74666bc095c95f531c9a63c86f235b0b9e31c3707dbbbdfc5d59",
+    "artifact_sha256": "3041c7163b9695ae3f786adc5b5f27c743c4a22424ec7bd21ce6737ddee7c850",
+    "spec_audit": {
+      "passed": true,
+      "diagnostics": []
+    },
+    "model_id": "boosted-v1-small",
+    "adapter_path": "",
+    "attempts": 2,
+    "model_scene_spec": {
+      "sceneType": "sakura",
+      "title": "Cherry Blossom Island",
+      "sky": "#87CEEB",
+      "fog": "#FFF9F1",
+      "waterDeep": "#8B4513",
+      "waterShallow": "#9C2236",
+      "blossom": "#FFD700",
+      "terrainRadius": 12,
+      "terrainHeight": 10,
+      "waterSize": 150,
+      "petalCount": 600,
+      "camera": [
+        100,
+        100,
+        100
+      ],
+      "trees": [
+        {
+          "x": 50,
+          "z": 50,
+          "scale": 0.5
+        },
+        {
+          "x": 150,
+          "z": 150,
+          "scale": 0.5
+        },
+        {
+          "x": 250,
+          "z": 250,
+          "scale": 0.5
+        }
+      ],
+      "details": [
+        "falling",
+        "vibrant",
+        "sunlight"
+      ],
+      "motion": {
+        "waterSpeed": 2,
+        "petalFallSpeed": 2,
+        "cameraOrbitSpeed": 0.1
+      }
+    },
+    "model_authored_fields": [
+      "blossom",
+      "camera",
+      "details",
+      "fog",
+      "motion",
+      "petalCount",
+      "sceneType",
+      "sky",
+      "terrainHeight",
+      "terrainRadius",
+      "title",
+      "trees",
+      "waterDeep",
+      "waterShallow",
+      "waterSize"
+    ],
+    "framework_default_fields": [],
+    "raw_output_sha256": "bd34e3057ef556727cf7f5a1063c39e648a137e66ee87a76b0be53020470579c"
+  },
+  "baseline_evaluation": {
+    "score": 1.0,
+    "passed": true,
+    "hard_gates": {
+      "exists": true,
+      "substantial": true,
+      "no_placeholders": true,
+      "entrypoint_shape": true,
+      "source_not_rendered_as_text": true,
+      "javascript_syntax": true,
+      "runtime_render": true
+    },
+    "feature_scores": {
+      "three.js": 1.0,
+      "voxel": 1.0,
+      "shader": 1.0,
+      "island": 1.0,
+      "sakura": 1.0,
+      "responsive": 1.0
+    },
+    "diagnostics": [],
+    "bytes": 36269,
+    "lines": 778,
+    "screenshot_path": "E:\\iloptimus-home\\learning\\8dac8bd6296d\\baseline\\runtime.png"
+  },
+  "phase_timings": {
+    "baseline_generation_and_verification_seconds": 187.701
+  },
+  "acceptance": {
+    "accepted": true,
+    "baseline_score": 1.0,
+    "adapted_score": 1.0,
+    "improvement": 0.0,
+    "reason": "The framework-compiled local model design passed every objective runtime gate; training was unnecessary"
+  }
+}

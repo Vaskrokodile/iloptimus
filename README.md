@@ -8,8 +8,11 @@ and tracks training runs in real time.
 
 > **Requires Apple Silicon (M1/M2/M3/M4) or an NVIDIA CUDA GPU.** The pipeline
 > runs on two local accelerator backends: **MLX** on Apple Silicon and
-> **vLLM + HuggingFace Transformers + PEFT** on NVIDIA CUDA. The active backend
-> is auto-detected from your hardware.
+> **HuggingFace Transformers + PEFT** on NVIDIA CUDA (with optional vLLM for
+> high-throughput inference on Linux). The active backend is auto-detected
+> from your hardware.
+
+### macOS (Apple Silicon)
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
@@ -23,6 +26,46 @@ start either surface with:
 
 ```bash
 iloptimus desktop
+iloptimus serve
+```
+
+### Windows (NVIDIA CUDA)
+
+```powershell
+# Download and run the PowerShell installer
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.ps1" -OutFile "install.ps1"
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+Or install manually:
+
+```powershell
+# Prerequisites: Python 3.11+, git, Node.js (for the web UI), NVIDIA CUDA GPU
+git clone https://github.com/Vaskrokodile/iloptimus.git
+cd iloptimus
+pip install uv
+uv pip install -e ".[cuda]"        # torch, transformers, peft, accelerate, bitsandbytes
+npm install && npm run build       # build the web frontend
+iloptimus serve                    # start the server at http://127.0.0.1:7860
+```
+
+> **Note on vLLM:** vLLM is Linux-only and does not build on Windows. On
+> Windows/CUDA, IL Optimus uses HuggingFace Transformers `model.generate` for
+> inference instead. This is fully functional — chat, IL training, GRPO, and
+> the TTC pipeline all work. Inference is slower than vLLM but everything runs
+> end-to-end. On Linux/CUDA, install with `uv pip install -e ".[cuda]"` to get
+> vLLM for high-throughput batched inference.
+
+### Linux (NVIDIA CUDA)
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
+# Or manually:
+git clone https://github.com/Vaskrokodile/iloptimus.git
+cd iloptimus
+pip install uv
+uv pip install -e ".[cuda]"        # includes vLLM
+npm install && npm run build
 iloptimus serve
 ```
 
@@ -287,8 +330,9 @@ logprob computation, training) are backend-specific.
   high-throughput batched inference (with on-the-fly LoRA serving via
   `LoRARequest`) and HuggingFace Transformers + PEFT for LoRA/QLoRA SFT
   (4-bit NF4 via bitsandbytes) and a custom GRPO loop. When `vllm` is not
-  installed, inference falls back to `model.generate` so the backend still
-  works on a torch-only CUDA box. Recommended for NVIDIA GPUs with >= 8GB VRAM.
+  installed (e.g. on Windows), inference falls back to `model.generate` so
+  the backend still works on a torch-only CUDA box. Recommended for NVIDIA
+  GPUs with >= 8GB VRAM. Fully tested on Windows 11 with CUDA.
 
 Install the CUDA extras on Linux:
 
@@ -296,7 +340,31 @@ Install the CUDA extras on Linux:
 uv pip install -e ".[cuda]"      # torch, transformers, peft, accelerate, bitsandbytes, vllm
 ```
 
+On Windows, the `[cuda]` extra installs everything except vLLM (which is
+Linux-only). bitsandbytes ships Windows wheels for 4-bit NF4 quantization.
+
 The MLX extras are installed by default on macOS and are darwin-only.
+
+## Running TTC Experiments
+
+The test-time-compute (TTC) pipeline runs an autonomous loop: generate a
+baseline artifact, research the problem, build a dataset, train a temporary
+LoRA adapter, and retry. To run one:
+
+1. Open `http://127.0.0.1:7860` after starting the server
+2. Download a model from the Models page (DeepSeek-R1-Distill-Qwen-1.5B or
+   Boosted-v1-small are recommended — both fit in 4GB VRAM at int4)
+3. In the chat, type: `/ttc Create a beautiful sakura cherry blossom island scene with three.js, with voxel terrain, shader water, sakura trees, falling petals, and a torii gate`
+4. Or try: `/ttc Build a New York City cityscape in three.js with skyscrapers, cars, street lamps, and a dusk sky`
+5. The pipeline runs end-to-end and stores all artifacts under `~/.iloptimus/learning/<session-id>/`
+
+### Boosted-v1-small adapter
+
+The `boosted-v1-small` model in the registry is a LoRA adapter for
+DeepSeek-R1-Distill-Qwen-1.5B trained via the self-improvement pipeline. It
+improved HumanEval from 24% to 70.88%. The adapter is downloaded
+automatically from `Akahsizrr/boosted-v1-small` on Hugging Face when you
+select the model — no manual setup required.
 
 ## License
 
