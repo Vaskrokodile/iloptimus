@@ -1,12 +1,12 @@
-# IL Optimus — Windows install script
+# Optimus Studio — Windows install script
 # Requires: Python 3.11+, NVIDIA CUDA GPU, git, Node.js (for web UI)
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "  IL Optimus — Windows Installer" -ForegroundColor Cyan
-Write-Host "  Intuition Learning Pipeline Studio" -ForegroundColor DarkGray
+Write-Host "  Optimus Studio — Windows Installer" -ForegroundColor Cyan
+Write-Host "  Local harness for open-source models (IL + PQLoRA)" -ForegroundColor DarkGray
 Write-Host ""
 
 # ---- Check Python ----
@@ -28,7 +28,7 @@ if ($nvidiaSmi) {
     $gpuInfo = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1
     Write-Host "  GPU: $gpuInfo" -ForegroundColor Green
 } else {
-    Write-Host "  Warning: nvidia-smi not found. IL Optimus needs an NVIDIA CUDA GPU." -ForegroundColor Yellow
+    Write-Host "  Warning: nvidia-smi not found. Optimus Studio needs an NVIDIA CUDA GPU." -ForegroundColor Yellow
     Write-Host "  CPU-only mode will work for chat but not for training." -ForegroundColor Yellow
 }
 
@@ -46,8 +46,8 @@ if (-not $uv) {
 $installDir = "iloptimus"
 if (-not (Test-Path $installDir)) {
     Write-Host ""
-    Write-Host "  Cloning IL Optimus..." -ForegroundColor Cyan
-    git clone https://github.com/Vaskrokodile/iloptimus.git $installDir
+    Write-Host "  Cloning Optimus Studio..." -ForegroundColor Cyan
+    git clone https://github.com/Vaskrokodile/optimus-studio.git $installDir
 }
 Set-Location $installDir
 
@@ -99,7 +99,7 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 # ---- Done ----
 Write-Host ""
 Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host "  IL Optimus is installed." -ForegroundColor Green
+Write-Host "  Optimus Studio is installed." -ForegroundColor Green
 Write-Host "  ============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Quick start:" -ForegroundColor White
@@ -113,7 +113,7 @@ Write-Host "  The boosted-v1-small adapter (HumanEval 24% -> 70.88%) downloads a
 Write-Host ""
 
 # ---- Optionally start the server ----
-$start = Read-Host "  Start IL Optimus now? (y/N)"
+$start = Read-Host "  Start Optimus Studio now? (y/N)"
 if ($start -match "^[yY]") {
     Write-Host ""
     Write-Host "  Starting server..." -ForegroundColor Cyan

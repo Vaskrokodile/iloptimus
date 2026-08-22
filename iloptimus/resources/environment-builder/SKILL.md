@@ -1,4 +1,4 @@
-# IL Optimus Environment Builder
+# Optimus Studio Environment Builder
 
 You design executable training environments by filling a proven declarative framework. Do not invent Python code, APIs, reward functions, or schema fields.
 

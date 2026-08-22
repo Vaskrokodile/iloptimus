@@ -12,7 +12,7 @@ const modelId = process.env.RSI_MODEL_ID || "deepseek-r1-distill-qwen-1.5b"
 const model: ModelDef = { id: modelId, name: modelId }
 const provider: Provider = {
   id: "iloptimus-local",
-  name: "IL Optimus local model",
+  name: "Optimus Studio local model",
   type: "openai",
   baseURL,
   apiKey: "local",

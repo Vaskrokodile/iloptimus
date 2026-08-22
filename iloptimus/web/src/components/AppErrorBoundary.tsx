@@ -8,7 +8,7 @@ export default class AppErrorBoundary extends Component<{ children: ReactNode },
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("IL Optimus page error", error, info);
+    console.error("Optimus Studio page error", error, info);
   }
 
   render() {

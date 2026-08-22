@@ -1,4 +1,4 @@
-"""IL Optimus CLI — start the server and open the browser."""
+"""Optimus Studio CLI — start the server and open the browser."""
 
 from __future__ import annotations
 
@@ -63,12 +63,12 @@ def main():
     _ensure_disk_env()
     parser = argparse.ArgumentParser(
         prog="iloptimus",
-        description="IL Optimus — run Intuition Learning pipelines locally with a web frontend.",
+        description="Optimus Studio — a full local harness for open-source models (IL + PQLoRA).",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     # serve
-    serve_parser = subparsers.add_parser("serve", help="Start the IL Optimus server")
+    serve_parser = subparsers.add_parser("serve", help="Start the Optimus Studio server")
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     serve_parser.add_argument("--port", type=int, default=7860, help="Port to bind (default: 7860)")
     serve_parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
@@ -103,7 +103,7 @@ def main():
         except (RuntimeError, FileExistsError, subprocess.CalledProcessError) as error:
             print(f"Desktop installation failed: {error}", file=sys.stderr)
             raise SystemExit(2) from error
-        print(f"Installed IL Optimus at {installed}")
+        print(f"Installed Optimus Studio at {installed}")
         return
 
     if args.command == "desktop":
@@ -112,7 +112,7 @@ def main():
         try:
             launch_macos_app()
         except (RuntimeError, FileExistsError, subprocess.CalledProcessError) as error:
-            print(f"Could not open IL Optimus: {error}", file=sys.stderr)
+            print(f"Could not open Optimus Studio: {error}", file=sys.stderr)
             raise SystemExit(2) from error
         return
 
@@ -144,7 +144,7 @@ def main():
                 )
             else:
                 print(
-                    "Not ready for training: IL Optimus needs Apple Silicon (MLX) or an NVIDIA CUDA GPU "
+                    "Not ready for training: Optimus Studio needs Apple Silicon (MLX) or an NVIDIA CUDA GPU "
                     "(vLLM / PyTorch)."
                 )
                 raise SystemExit(2)
@@ -160,8 +160,8 @@ def main():
         print()
         print("  ╔══════════════════════════════════════════╗")
         from . import __version__
-        print(f"  ║          IL OPTIMUS  v{__version__:<18}║")
-        print("  ║   Intuition Learning Pipeline Studio     ║")
+        print(f"  ║          OPTIMUS STUDIO  v{__version__:<15}║")
+        print("  ║   Local harness for open-source models   ║")
         print("  ╚══════════════════════════════════════════╝")
         print()
         from .core.storage import ensure_app_dirs

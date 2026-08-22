@@ -432,7 +432,7 @@ def _responses_tool_subset(raw_tools: list[Any], transcript: list[str]) -> list[
 
 def create_app() -> FastAPI:
     ensure_app_dirs()
-    app = FastAPI(title="IL Optimus", version=__version__)
+    app = FastAPI(title="Optimus Studio", version=__version__)
     rsi_panels = RsiPanelManager()
     learning = LearningManager()
     harness_graph = HarnessGraphManager()
@@ -2259,7 +2259,7 @@ def create_app() -> FastAPI:
                         "id": model.id,
                         "slug": model.id,
                         "display_name": model.name,
-                        "description": "A locally hosted model managed by IL Optimus.",
+                        "description": "A locally hosted model managed by Optimus Studio.",
                         "default_reasoning_level": None,
                         "supported_reasoning_levels": [],
                         "shell_type": "shell_command",
@@ -2721,7 +2721,7 @@ def create_app() -> FastAPI:
         if hw.recommended_backend not in {"mlx", "vllm"}:
             raise HTTPException(
                 409,
-                "IL Optimus needs Apple Silicon (MLX) or an NVIDIA CUDA GPU (vLLM) for local model download and training",
+                "Optimus Studio needs Apple Silicon (MLX) or an NVIDIA CUDA GPU (vLLM) for local model download and training",
             )
         compatibility = check_compatibility(model, hw)
         if compatibility.status == "not-recommended":
@@ -3440,7 +3440,7 @@ def create_app() -> FastAPI:
         @app.get("/", response_class=HTMLResponse)
         async def no_frontend():
             return HTMLResponse(
-                "<html><body><h1>IL Optimus</h1>"
+                "<html><body><h1>Optimus Studio</h1>"
                 "<p>Frontend not built. Run <code>npm run build</code> in the web/ directory.</p>"
                 "<p>API is available at <a href='/api/health'>/api/health</a></p>"
                 "</body></html>"

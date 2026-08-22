@@ -1,6 +1,6 @@
-"""Backend abstraction for IL Optimus.
+"""Backend abstraction for Optimus Studio.
 
-IL Optimus runs the same Intuition Learning pipeline (SFT + GRPO) on two
+Optimus Studio runs the same Intuition Learning pipeline (SFT + GRPO) on two
 local accelerator stacks:
 
 - **MLX** (Apple Silicon) — ``mlx_lm`` for inference and compiled LoRA/QLoRA

@@ -71,14 +71,15 @@ export default function DashboardPage() {
       <motion.div variants={fadeUp} className="text-center py-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/10 border border-accent/20 mb-4">
           <Sparkles className="w-3.5 h-3.5 text-accent" />
-          <span className="text-xs font-medium text-accent">Intuition Learning Pipeline</span>
+          <span className="text-xs font-medium text-accent">Local Harness for Open-Source Models</span>
         </div>
         <h1 className="text-4xl font-bold tracking-tight text-fg-primary mb-3">
           Train smarter, locally.
         </h1>
         <p className="text-fg-secondary text-lg max-w-2xl mx-auto">
-          Run SFT + GRPO RL pipelines on your hardware. Detect your GPU, pick a
-          compatible model, select a taskset, and train.
+          A full local harness for open-source models. Run IL (SFT + GRPO RL)
+          pipelines and PQLoRA (parameter-targeted QLoRA) on your hardware.
+          Detect your GPU, pick a compatible model, select a taskset, and train.
         </p>
       </motion.div>
 

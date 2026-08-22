@@ -10,7 +10,7 @@ from .core.pipeline import _persist_state, get_run, run_pipeline
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run one IL Optimus pipeline worker")
+    parser = argparse.ArgumentParser(description="Run one Optimus Studio pipeline worker")
     parser.add_argument("run_id")
     args = parser.parse_args()
     state = get_run(args.run_id)
@@ -19,7 +19,7 @@ def main() -> int:
 
     # Loading persisted state intentionally marks orphaned runs as interrupted.
     # This process is the owner now, so remove that synthetic in-memory marker.
-    if state.events and state.events[-1].get("message") == "Run was interrupted when IL Optimus stopped":
+    if state.events and state.events[-1].get("message") == "Run was interrupted when Optimus Studio stopped":
         state.events.pop()
     state.status = "pending"
     _persist_state(state)

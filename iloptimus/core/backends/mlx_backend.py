@@ -1115,7 +1115,7 @@ def _collect_rollout(
 
 
 class MLXGRPOTrainer(GRPOTrainerLike):
-    """Real GRPO trainer for IL Optimus (MLX)."""
+    """Real GRPO trainer for Optimus Studio (MLX)."""
 
     def __init__(
         self,

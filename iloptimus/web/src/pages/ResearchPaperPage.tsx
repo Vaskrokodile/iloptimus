@@ -75,7 +75,7 @@ export default function ResearchPaperPage() {
   return (
     <article className="paper-page">
       <header className="paper-topbar">
-        <a className="paper-wordmark" href="/" aria-label="Back to IL Optimus">
+        <a className="paper-wordmark" href="/" aria-label="Back to Optimus Studio">
           <span>IL</span><strong>Optimus Research</strong>
         </a>
         <nav aria-label="Paper sections">
@@ -99,7 +99,7 @@ export default function ResearchPaperPage() {
             gate passed with a perfect score.
           </p>
           <div className="paper-authors">
-            <div><strong>IL Optimus Autonomous Harness</strong><span>Execution, compilation, verification</span></div>
+            <div><strong>Optimus Studio Autonomous Harness</strong><span>Execution, compilation, verification</span></div>
             <div><strong>Boosted-v1-small · int4</strong><span>Local scene design model</span></div>
             <div><strong>August 2026</strong><span>Local NVIDIA GPU · 100% offline</span></div>
           </div>
@@ -306,7 +306,7 @@ export default function ResearchPaperPage() {
       </main>
 
       <footer className="paper-footer">
-        <span>IL Optimus Research · Autonomous local intelligence</span>
+        <span>Optimus Studio Research · Autonomous local intelligence</span>
         <span>Session {SESSION_ID} · Score 1.000 · 187.701 seconds</span>
       </footer>
     </article>

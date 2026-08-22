@@ -59,7 +59,7 @@ def build_task_prompt(
     repair = ""
     if issues:
         repair = "\nFix these validation failures:\n" + "\n".join(f"- {issue}" for issue in issues)
-    return f"""You are filling one task in the IL Optimus executable environment framework.
+    return f"""You are filling one task in the Optimus Studio executable environment framework.
 Training mode: {mode.upper()}
 Environment goal: {description.strip()}
 Difficulty: {difficulty}

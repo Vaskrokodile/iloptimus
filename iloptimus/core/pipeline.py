@@ -187,7 +187,7 @@ def _load_saved_runs() -> dict[str, RunState]:
                     timestamp=time.time(),
                     stage=state.stage,
                     level="error",
-                    message="Run was interrupted when IL Optimus stopped",
+                    message="Run was interrupted when Optimus Studio stopped",
                 ).to_dict()
             )
         saved[state.id] = state

@@ -1,7 +1,7 @@
 [project]
 name = "iloptimus"
 version = "0.2.0"
-description = "IL Optimus — run Intuition Learning pipelines locally with a web frontend. Detects hardware, recommends models, runs SFT+GRPO via mlx_lm/vllm."
+description = "Optimus Studio — a full local harness for open-source models. Bundles IL (Intuition Learning, SFT+GRPO) and PQLoRA (parameter-targeted QLoRA for more efficient fine-tuning). Detects hardware, recommends models, runs via mlx_lm/vllm."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

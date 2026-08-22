@@ -1,4 +1,4 @@
-// API client for IL Optimus backend
+// API client for Optimus Studio backend
 
 export interface HardwareInfo {
   cpu_name: string;

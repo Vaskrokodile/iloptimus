@@ -2,7 +2,7 @@
 
 The standalone TypeScript terminal remains the richer interactive client. This
 worker deliberately implements the same small verified control loop using only
-IL Optimus runtime dependencies, so a ``uv tool install`` desktop build works
+Optimus Studio runtime dependencies, so a ``uv tool install`` desktop build works
 without Bun or a repository checkout.
 """
 

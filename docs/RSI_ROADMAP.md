@@ -1,4 +1,4 @@
-# IL Optimus: RSI and Test-Time Learning Roadmap
+# Optimus Studio: RSI and Test-Time Learning Roadmap
 
 This roadmap defines the product boundary for local agent orchestration and
 test-time learning. “Self-improvement” means generating a task-specific,
@@ -10,7 +10,7 @@ capability gains without an evaluation.
 
 ```mermaid
 mindmap
-  root((IL Optimus))
+  root((Optimus Studio))
     Local models
       Downloaded checkpoints
       Shared inference queue
@@ -64,7 +64,7 @@ mindmap
 
 ```mermaid
 flowchart TB
-    UI["React workspace tabs"] --> API["IL Optimus supervisor API"]
+    UI["React workspace tabs"] --> API["Optimus Studio supervisor API"]
     API --> IQ["Shared local inference queue"]
     API --> PW["RSI worker processes"]
     API --> TR["Training and environment runtimes"]

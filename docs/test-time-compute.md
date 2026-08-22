@@ -1,6 +1,6 @@
 # Failure-driven test-time compute
 
-IL Optimus treats test-time adaptation as a measured experiment, not as a claim
+Optimus Studio treats test-time adaptation as a measured experiment, not as a claim
 that any training run improved a model.
 
 For explicit `/ttc <artifact task>` and artifact-shaped `/learn` requests, the
@@ -60,7 +60,7 @@ optimizer is AdamW. A bounded one-gigabyte allocator-cache threshold replaces
 `mlx-lm`'s zero threshold, which otherwise clears reusable buffers after every
 step. In a paired 12-step benchmark with identical tokens and losses, retaining
 that bounded cache reduced load-plus-training time from 24.456 to 23.745
-seconds (2.9%). IL Optimus also seeds NumPy explicitly because the installed
+seconds (2.9%). Optimus Studio also seeds NumPy explicitly because the installed
 iterator's truthiness guard otherwise ignores the valid recorded seed zero.
 
 Adapter initialization and data order use a recorded seed. The selector records

@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "IL Optimus"
+        window.title = "Optimus Studio"
         window.titlebarAppearsTransparent = true
         window.center()
         window.contentView = webView
@@ -39,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             try process.run()
             server = process
         } catch {
-            showStartupError("Could not start the local IL Optimus service: \(error.localizedDescription)")
+            showStartupError("Could not start the local Optimus Studio service: \(error.localizedDescription)")
         }
     }
 
@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
-        webView.loadHTMLString("<style>body{background:#111216;color:#fff;font:16px -apple-system;padding:70px}h1{font-size:32px}p{color:#aaa;line-height:1.6}</style><h1>IL Optimus could not start</h1><p>\(escaped)</p>", baseURL: nil)
+        webView.loadHTMLString("<style>body{background:#111216;color:#fff;font:16px -apple-system;padding:70px}h1{font-size:32px}p{color:#aaa;line-height:1.6}</style><h1>Optimus Studio could not start</h1><p>\(escaped)</p>", baseURL: nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

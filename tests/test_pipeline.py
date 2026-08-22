@@ -1,4 +1,4 @@
-"""Integration tests for the IL Optimus pipeline.
+"""Integration tests for the Optimus Studio pipeline.
 
 Tests the full pipeline orchestration end-to-end with a mock model, so we
 don't need to download a real model from HuggingFace. The ML modules

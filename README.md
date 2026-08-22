@@ -1,8 +1,19 @@
-# IL Optimus — Intuition Learning Pipeline Studio
+# Optimus Studio — A Full Local Harness for Open-Source Models
 
-Run Intuition Learning (SFT + GRPO RL) pipelines locally with a web frontend.
-Detects your hardware, recommends compatible models, lets you select tasksets,
-and tracks training runs in real time.
+Optimus Studio is a complete local harness for open-source models. It bundles
+two core subsystems:
+
+- **IL** (Intuition Learning) — runs SFT + GRPO RL pipelines locally with a web
+  frontend. Detects your hardware, recommends compatible models, lets you select
+  tasksets, and tracks training runs in real time.
+- **PQLoRA** (Parameter-targeted QLoRA) — a variant of QLoRA that applies
+  quantized LoRA adapters only to a targeted subset of parameters instead of
+  every linear layer, making QLoRA more memory- and compute-efficient while
+  preserving quality.
+
+The harness auto-detects your accelerator (Apple Silicon MLX or NVIDIA CUDA via
+HuggingFace Transformers + PEFT, with optional vLLM on Linux) and runs the same
+IL and PQLoRA pipelines across both backends.
 
 ## Install and Start
 
@@ -15,10 +26,10 @@ and tracks training runs in real time.
 ### macOS (Apple Silicon)
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/optimus-studio/main/scripts/install.sh | sh
 ```
 
-The installer installs `uv` when needed, installs IL Optimus as an isolated
+The installer installs `uv` when needed, installs Optimus Studio as an isolated
 command-line app, builds a small native macOS app in `~/Applications`, starts
 the local service, and opens the desktop window. If native installation is not
 available, it prints the localhost URL and opens the default browser. Later,
@@ -33,7 +44,7 @@ iloptimus serve
 
 ```powershell
 # Download and run the PowerShell installer
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.ps1" -OutFile "install.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vaskrokodile/optimus-studio/main/scripts/install.ps1" -OutFile "install.ps1"
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
@@ -41,7 +52,7 @@ Or install manually:
 
 ```powershell
 # Prerequisites: Python 3.11+, git, Node.js (for the web UI), NVIDIA CUDA GPU
-git clone https://github.com/Vaskrokodile/iloptimus.git
+git clone https://github.com/Vaskrokodile/optimus-studio.git
 cd iloptimus
 pip install uv
 uv venv .venv
@@ -61,7 +72,7 @@ npm install && npm run build       # build the web frontend
 > ```
 
 > **Note on vLLM:** vLLM is Linux-only and does not build on Windows. On
-> Windows/CUDA, IL Optimus uses HuggingFace Transformers `model.generate` for
+> Windows/CUDA, Optimus Studio uses HuggingFace Transformers `model.generate` for
 > inference instead. This is fully functional — chat, IL training, GRPO, and
 > the TTC pipeline all work. Inference is slower than vLLM but everything runs
 > end-to-end. On Linux/CUDA, install with `uv pip install -e ".[cuda]"` to get
@@ -70,9 +81,9 @@ npm install && npm run build       # build the web frontend
 ### Linux (NVIDIA CUDA)
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/iloptimus/main/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/Vaskrokodile/optimus-studio/main/scripts/install.sh | sh
 # Or manually:
-git clone https://github.com/Vaskrokodile/iloptimus.git
+git clone https://github.com/Vaskrokodile/optimus-studio.git
 cd iloptimus
 pip install uv
 uv pip install -e ".[cuda]"        # includes vLLM
@@ -133,7 +144,7 @@ automated curation, adapter training, exact retry, and the Sakura proof run.
 
 ## Local Agent Skills and Tools
 
-IL Optimus packages four prompt-only skills sourced from the official
+Optimus Studio packages four prompt-only skills sourced from the official
 `anthropics/skills` and `openai/skills` repositories: frontend design,
 Playwright/browser testing, security best practices, and Jupyter notebooks.
 The router activates at most two relevant skills from explicit prompt keywords.
@@ -164,14 +175,14 @@ The curator records supervised-token retention before training. On the current
 Sakura corpus this increased retained answer tokens from 61.6% to 99.64% while
 expanding the accepted set from 79 to 111 independently sourced units.
 
-For compact MLX adapters, IL Optimus can cache the frozen transformer prefix
+For compact MLX adapters, Optimus Studio can cache the frozen transformer prefix
 once and train only the final LoRA-enabled suffix. The one-time cache build and
 sustained suffix step rate are budgeted separately and persisted; the planner
 does not hide cache construction behind the reported updates/second.
 
 ## How No-Code Environments Work
 
-Type `/il <goal>` or `/rl <goal>` after selecting a downloaded model. IL Optimus
+Type `/il <goal>` or `/rl <goal>` after selecting a downloaded model. Optimus Studio
 asks the local model for small task proposals, validates them, and compiles the
 result into a versioned environment. Small models never write or execute Python:
 they fill a constrained contract described in
@@ -199,7 +210,7 @@ step rewards, invalid-action penalties, timeouts, and multiple initial-state
 scenarios. The local API exposes real reset/step execution, and **My
 environments → Test** provides an interactive episode console.
 
-During training, the model emits an action trajectory. IL Optimus replays every
+During training, the model emits an action trajectory. Optimus Studio replays every
 action through the same simulator, stops at terminal states, and feeds the
 executed trajectory reward into benchmarking and GRPO. Built-in navigation,
 tool-workflow, and resource-control templates give small local models a trusted
@@ -325,7 +336,7 @@ uv run iloptimus version            # Print version
 
 ## Backends
 
-IL Optimus auto-detects your accelerator and selects one of two local
+Optimus Studio auto-detects your accelerator and selects one of two local
 backends. Both implement the same `Backend` interface
 (`iloptimus/core/backends/base.py`) so the pipeline, inference orchestration,
 SFT data generation, and GRPO advantage computation are shared across

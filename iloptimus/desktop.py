@@ -1,4 +1,4 @@
-"""Build and launch the small native macOS shell for the local IL Optimus service."""
+"""Build and launch the small native macOS shell for the local Optimus Studio service."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def default_app_path() -> Path:
-    return Path.home() / "Applications" / "IL Optimus.app"
+    return Path.home() / "Applications" / "Optimus Studio.app"
 
 
 def install_macos_app(destination: Path | None = None, *, force: bool = False) -> Path:

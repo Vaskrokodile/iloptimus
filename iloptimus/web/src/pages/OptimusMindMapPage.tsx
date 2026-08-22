@@ -60,7 +60,7 @@ const categoryMeta: Record<Category, { label: string; icon: typeof Bot }> = {
 
 const nodes: MapNode[] = [
   {
-    id: "optimus", title: "IL Optimus", caption: "Local model operating system", category: "learn", x: 970, y: 630,
+    id: "optimus", title: "Optimus Studio", caption: "Local model operating system", category: "learn", x: 970, y: 630,
     metric: "One local harness", details: ["Chat, build, train, evaluate and improve from one localhost workspace.", "Models, runs, environments, skills and evidence remain on the user's machine."],
   },
   {
@@ -239,7 +239,7 @@ export default function OptimusMindMapPage() {
     <div className="optimus-map-page">
       <header className="optimus-map-header">
         <div className="optimus-map-brand">
-          <Link to="/" aria-label="Back to IL Optimus"><ArrowLeft /></Link>
+          <Link to="/" aria-label="Back to Optimus Studio"><ArrowLeft /></Link>
           <span className="optimus-map-mark"><Network /></span>
           <div><strong>Optimus system map</strong><small>Capabilities + autonomous improvement</small></div>
         </div>
